@@ -6,7 +6,7 @@
     "visualClassName": "Visual",
     "version": "1.0.0.0",
     "description": "A customizable boxplot visual for Power BI",
-    "supportUrl": "https://example.com/support",
+    "supportUrl": "https://github.com/belcouact/powerbi-boxplot",
     "gitHubUrl": ""
   },
   "apiVersion": "5.7.0",
