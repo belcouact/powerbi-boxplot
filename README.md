@@ -195,4 +195,4 @@ MIT
 
 ## Author
 
-Alex
+Alex Luo (aluo@wlgore.com)
