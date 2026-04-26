@@ -1,0 +1,25 @@
+{
+  "visual": {
+    "name": "boxplotVisual",
+    "displayName": "Boxplot",
+    "guid": "boxplotVisual8A2B3C4D5E6F",
+    "visualClassName": "Visual",
+    "version": "1.0.0.0",
+    "description": "A customizable boxplot visual for Power BI",
+    "supportUrl": "https://example.com/support",
+    "gitHubUrl": ""
+  },
+  "apiVersion": "5.7.0",
+  "author": {
+    "name": "Alex Luo",
+    "email": "aluo@wlgore.com"
+  },
+  "assets": {
+    "icon": "assets/icon.png"
+  },
+  "externalJS": [],
+  "style": "style/visual.less",
+  "capabilities": "capabilities.json",
+  "dependencies": null,
+  "stringResources": []
+}

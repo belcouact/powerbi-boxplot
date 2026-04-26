@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "allowJs": false,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "target": "ES2019",
+    "sourceMap": true,
+    "outDir": "./.tmp/build/",
+    "moduleResolution": "node",
+    "declaration": true,
+    "lib": [
+      "ES2019",
+      "dom"
+    ],
+    "module": "ESNext",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "node_modules/powerbi-visuals-api/**/*.d.ts"
+  ],
+  "files": [
+    "src/visual.ts",
+    "src/settings.ts"
+  ]
+}

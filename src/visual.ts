@@ -1,0 +1,1556 @@
+import powerbi from "powerbi-visuals-api";
+import IVisual = powerbi.extensibility.IVisual;
+import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
+import VisualUpdateOptions = powerbi.extensibility.visual.VisualUpdateOptions;
+import EnumerateVisualObjectInstancesOptions = powerbi.EnumerateVisualObjectInstancesOptions;
+import VisualObjectInstanceEnumeration = powerbi.VisualObjectInstanceEnumeration;
+import DataView = powerbi.DataView;
+
+import * as d3 from "d3";
+type Selection<T extends d3.BaseType> = d3.Selection<T, any, any, any>;
+
+import { VisualSettings, BoxplotSettings, defaultSettings } from "./settings";
+
+interface BoxplotData {
+    category: string;
+    subCategory: string;
+    min: number;
+    q1: number;
+    median: number;
+    q3: number;
+    max: number;
+    mean: number;
+    stdDev: number;
+    count: number;
+    iqr: number;
+    outliers: number[];
+    values: number[];
+    confidenceInterval: [number, number];
+    colorIndex: number;
+}
+
+export class Visual implements IVisual {
+    private target: HTMLElement;
+    private settings: VisualSettings;
+    private svg: Selection<SVGSVGElement>;
+    private mainGroup: Selection<SVGGElement>;
+    private colorPalette: d3.ScaleOrdinal<string, string>;
+
+    constructor(options: VisualConstructorOptions) {
+        this.target = options.element;
+        this.settings = VisualSettings.getDefault();
+
+        this.colorPalette = d3.scaleOrdinal(d3.schemeCategory10);
+
+        this.svg = d3.select(this.target)
+            .append("svg")
+            .classed("boxplot-svg", true);
+
+        this.mainGroup = this.svg
+            .append("g")
+            .classed("main-group", true);
+    }
+
+    public update(options: VisualUpdateOptions): void {
+        const dataView: DataView = options.dataViews[0];
+        this.settings = this.parseSettings(dataView);
+
+        const width = options.viewport.width;
+        const height = options.viewport.height;
+
+        this.svg.attr("width", width).attr("height", height);
+
+        this.mainGroup.selectAll("*").remove();
+
+        if (!dataView) {
+            this.showDebugMessage(width, height, "No dataView received");
+            return;
+        }
+
+        const dataViewType = dataView.categorical ? "categorical" : dataView.table ? "table" : "unknown";
+        
+        if (!dataView.table) {
+            this.showDebugMessage(width, height, `Expected table data but got: ${dataViewType}\n\nPlease ensure you have added:\n- Category field\n- Values field`);
+            return;
+        }
+
+        if (!dataView.table.rows || dataView.table.rows.length === 0) {
+            this.showDebugMessage(width, height, "Table has no rows");
+            return;
+        }
+
+        let boxplotData = this.processData(dataView, width, height);
+        
+        if (boxplotData.length === 0) {
+            return;
+        }
+
+        boxplotData = this.sortData(boxplotData);
+
+        if (this.settings.boxplot.orientation === "horizontal") {
+            this.renderHorizontalBoxplot(boxplotData, width, height);
+        } else {
+            this.renderVerticalBoxplot(boxplotData, width, height);
+        }
+    }
+
+    private showDebugMessage(width: number, height: number, message: string): void {
+        const g = this.mainGroup;
+        
+        g.append("text")
+            .attr("x", width / 2)
+            .attr("y", height / 2 - 20)
+            .attr("text-anchor", "middle")
+            .attr("fill", "#666666")
+            .style("font-size", "14px")
+            .style("font-weight", "bold")
+            .text("Boxplot Visual - Debug Info");
+
+        const lines = message.split('\n');
+        lines.forEach((line, i) => {
+            g.append("text")
+                .attr("x", width / 2)
+                .attr("y", height / 2 + 10 + (i * 20))
+                .attr("text-anchor", "middle")
+                .attr("fill", "#999999")
+                .style("font-size", "12px")
+                .text(line);
+        });
+
+        g.append("text")
+            .attr("x", width / 2)
+            .attr("y", height - 30)
+            .attr("text-anchor", "middle")
+            .attr("fill", "#cccccc")
+            .style("font-size", "10px")
+            .text(`Viewport: ${Math.round(width)} x ${Math.round(height)}`);
+    }
+
+    private parseSettings(dataView: DataView): VisualSettings {
+        const settings = VisualSettings.getDefault();
+
+        if (dataView && dataView.metadata && dataView.metadata.objects) {
+            const objects = dataView.metadata.objects;
+
+            const merged = { ...defaultSettings };
+
+            if (objects["boxplot"]) {
+                Object.assign(merged, objects["boxplot"]);
+            }
+            if (objects["whiskers"]) {
+                Object.assign(merged, objects["whiskers"]);
+            }
+            if (objects["outliers"]) {
+                Object.assign(merged, objects["outliers"]);
+            }
+            if (objects["distribution"]) {
+                Object.assign(merged, objects["distribution"]);
+            }
+            if (objects["axis"]) {
+                Object.assign(merged, objects["axis"]);
+            }
+            if (objects["labels"]) {
+                Object.assign(merged, objects["labels"]);
+            }
+            if (objects["sorting"]) {
+                Object.assign(merged, objects["sorting"]);
+            }
+            if (objects["referenceLines"]) {
+                Object.assign(merged, objects["referenceLines"]);
+            }
+
+            settings.boxplot = merged as BoxplotSettings;
+        }
+
+        return settings;
+    }
+
+    private processData(dataView: DataView, width: number, height: number): BoxplotData[] {
+        const table = dataView.table;
+        if (!table || !table.rows || table.rows.length === 0) {
+            return [];
+        }
+
+        let categoryIdx = -1;
+        let subCategoryIdx = -1;
+        let valuesIdx = -1;
+
+        if (table.columns) {
+            for (let i = 0; i < table.columns.length; i++) {
+                const col = table.columns[i];
+                if (col.roles) {
+                    if (col.roles["category"]) categoryIdx = i;
+                    if (col.roles["subCategory"]) subCategoryIdx = i;
+                    if (col.roles["values"]) valuesIdx = i;
+                }
+            }
+        }
+
+        if (valuesIdx === -1) {
+            for (let i = 0; i < table.columns.length; i++) {
+                const col = table.columns[i];
+                if (col.type && (col.type.numeric || col.type.integer)) {
+                    valuesIdx = i;
+                    break;
+                }
+            }
+        }
+
+        if (categoryIdx === -1) categoryIdx = 0;
+        if (valuesIdx === -1) valuesIdx = Math.min(table.columns.length - 1, 2);
+
+        const groupedData: Map<string, { values: number[]; subCategory: string }> = new Map();
+        let validCount = 0;
+        let invalidCount = 0;
+        let sampleValues: string[] = [];
+
+        for (let i = 0; i < table.rows.length; i++) {
+            const row = table.rows[i];
+            const category = row[categoryIdx] !== null && row[categoryIdx] !== undefined ? String(row[categoryIdx]) : "Unknown";
+            const subCategory = subCategoryIdx !== -1 && row[subCategoryIdx] !== null && row[subCategoryIdx] !== undefined ? String(row[subCategoryIdx]) : "";
+            const value = row[valuesIdx];
+
+            const key = subCategory ? `${category}|||${subCategory}` : category;
+
+            let numValue: number;
+            if (typeof value === 'object' && value !== null && !(value instanceof Date)) {
+                numValue = Number((value as any).value || value);
+            } else {
+                numValue = Number(value);
+            }
+
+            if (value !== null && value !== undefined && !isNaN(numValue)) {
+                if (!groupedData.has(key)) {
+                    groupedData.set(key, { values: [], subCategory });
+                }
+                groupedData.get(key)!.values.push(numValue);
+                validCount++;
+                if (sampleValues.length < 3) {
+                    sampleValues.push(`${category}: ${JSON.stringify(value)} -> ${numValue}`);
+                }
+            } else {
+                invalidCount++;
+                if (sampleValues.length < 3) {
+                    sampleValues.push(`${category}: idx=${valuesIdx} val=${JSON.stringify(value)} [INVALID]`);
+                }
+            }
+        }
+
+        if (validCount === 0) {
+            const colInfo = table.columns ? table.columns.map((col: any, idx: number) => `[${idx}] ${col.displayName || col.queryName} roles:${JSON.stringify(col.roles)} type:${JSON.stringify(col.type)}`).join('\n') : 'none';
+            const debugInfo = `Total rows: ${table.rows.length}\nValid: ${validCount}, Invalid: ${invalidCount}\n\nColumn mapping:\ncatIdx=${categoryIdx}, subIdx=${subCategoryIdx}, valIdx=${valuesIdx}\n\nSample values:\n${sampleValues.join('\n')}\n\nColumns:\n${colInfo}`;
+            this.showDebugMessage(width, height, debugInfo);
+        }
+
+        const result: BoxplotData[] = [];
+        let colorIndex = 0;
+
+        for (const [key, data] of groupedData) {
+            const parts = key.split("|||");
+            const category = parts[0];
+            const subCategory = parts[1] || "";
+            const values = data.values.sort(d3.ascending);
+
+            if (values.length === 0) continue;
+
+            const stats = this.calculateStatistics(values);
+
+            result.push({
+                category,
+                subCategory,
+                ...stats,
+                colorIndex: colorIndex++
+            });
+        }
+
+        return result;
+    }
+
+    private calculateStatistics(data: number[]): Omit<BoxplotData, "category" | "subCategory" | "colorIndex"> {
+        const n = data.length;
+        const mean = d3.mean(data) as number;
+        const stdDev = d3.deviation(data) || 0;
+        const q1 = d3.quantile(data, 0.25) as number;
+        const q3 = d3.quantile(data, 0.75) as number;
+        const median = d3.quantile(data, 0.5) as number;
+        const iqr = q3 - q1;
+
+        const settings = this.settings.boxplot;
+        let min: number, max: number, outliers: number[];
+
+        switch (settings.whiskerMethod) {
+            case "minmax":
+                min = d3.min(data) as number;
+                max = d3.max(data) as number;
+                outliers = [];
+                break;
+            case "percentile":
+                const pLower = settings.percentileLower / 100;
+                const pUpper = settings.percentileUpper / 100;
+                min = d3.quantile(data, pLower) as number;
+                max = d3.quantile(data, pUpper) as number;
+                outliers = data.filter(d => d < min || d > max);
+                break;
+            case "stddev":
+                const multiplier = settings.stdDevMultiplier;
+                min = Math.max(d3.min(data) as number, mean - multiplier * stdDev);
+                max = Math.min(d3.max(data) as number, mean + multiplier * stdDev);
+                outliers = data.filter(d => d < mean - multiplier * stdDev || d > mean + multiplier * stdDev);
+                break;
+            case "iqr":
+            default:
+                const lowerFence = q1 - 1.5 * iqr;
+                const upperFence = q3 + 1.5 * iqr;
+                outliers = data.filter(d => d < lowerFence || d > upperFence);
+                const nonOutliers = data.filter(d => d >= lowerFence && d <= upperFence);
+                min = nonOutliers.length > 0 ? d3.min(nonOutliers) as number : d3.min(data) as number;
+                max = nonOutliers.length > 0 ? d3.max(nonOutliers) as number : d3.max(data) as number;
+                break;
+        }
+
+        const ciAlpha = 1 - settings.confidenceLevel / 100;
+        const tValue = this.tDistributionQuantile(1 - ciAlpha / 2, n - 1);
+        const ciMargin = tValue * (stdDev / Math.sqrt(n));
+        const confidenceInterval: [number, number] = [median - ciMargin, median + ciMargin];
+
+        return {
+            min,
+            q1,
+            median,
+            q3,
+            max,
+            mean,
+            stdDev,
+            count: n,
+            iqr,
+            outliers,
+            values: data,
+            confidenceInterval
+        };
+    }
+
+    private tDistributionQuantile(p: number, df: number): number {
+        if (df <= 0) return 1.96;
+        const approximations: { [key: number]: number } = {
+            1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+            6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+            15: 2.131, 20: 2.086, 25: 2.060, 30: 2.042, 40: 2.021,
+            50: 2.009, 60: 2.000, 80: 1.990, 100: 1.984, 120: 1.980
+        };
+
+        if (p === 0.975) {
+            const keys = Object.keys(approximations).map(Number).sort((a, b) => a - b);
+            if (df <= keys[0]) return approximations[keys[0]];
+            if (df >= keys[keys.length - 1]) return 1.96;
+
+            for (let i = 0; i < keys.length - 1; i++) {
+                if (df >= keys[i] && df <= keys[i + 1]) {
+                    const t0 = approximations[keys[i]];
+                    const t1 = approximations[keys[i + 1]];
+                    const ratio = (df - keys[i]) / (keys[i + 1] - keys[i]);
+                    return t0 + ratio * (t1 - t0);
+                }
+            }
+        }
+
+        return 1.96;
+    }
+
+    private sortData(data: BoxplotData[]): BoxplotData[] {
+        const settings = this.settings.boxplot;
+        const sorted = [...data];
+
+        sorted.sort((a, b) => {
+            let comparison = 0;
+            switch (settings.sortBy) {
+                case "median":
+                    comparison = a.median - b.median;
+                    break;
+                case "mean":
+                    comparison = a.mean - b.mean;
+                    break;
+                case "count":
+                    comparison = a.count - b.count;
+                    break;
+                case "category":
+                default:
+                    comparison = a.category.localeCompare(b.category);
+                    break;
+            }
+            return settings.sortOrder === "descending" ? -comparison : comparison;
+        });
+
+        return sorted;
+    }
+
+    private getStrokeDasharray(style: string): string {
+        switch (style) {
+            case "dashed": return "5,5";
+            case "dotted": return "2,2";
+            default: return "none";
+        }
+    }
+
+    private getMeanPath(shape: string, cx: number, cy: number, size: number): string {
+        const s = size;
+        switch (shape) {
+            case "diamond":
+                return `M${cx},${cy - s} L${cx + s},${cy} L${cx},${cy + s} L${cx - s},${cy} Z`;
+            case "triangle":
+                return `M${cx},${cy - s} L${cx + s * 0.866},${cy + s * 0.5} L${cx - s * 0.866},${cy + s * 0.5} Z`;
+            case "square":
+                return `M${cx - s},${cy - s} L${cx + s},${cy - s} L${cx + s},${cy + s} L${cx - s},${cy + s} Z`;
+            default:
+                return "";
+        }
+    }
+
+    private getOutlierPath(shape: string, cx: number, cy: number, size: number): string {
+        const s = size;
+        switch (shape) {
+            case "diamond":
+                return `M${cx},${cy - s} L${cx + s},${cy} L${cx},${cy + s} L${cx - s},${cy} Z`;
+            case "square":
+                return `M${cx - s},${cy - s} L${cx + s},${cy - s} L${cx + s},${cy + s} L${cx - s},${cy + s} Z`;
+            case "cross":
+                return `M${cx - s},${cy} L${cx + s},${cy} M${cx},${cy - s} L${cx},${cy + s}`;
+            default:
+                return "";
+        }
+    }
+
+    private computeKDE(values: number[], bandwidth: number, yMin: number, yMax: number, steps: number = 100): { y: number; density: number }[] {
+        const result: { y: number; density: number }[] = [];
+        const n = values.length;
+        if (n === 0) return result;
+
+        const yRange = yMax - yMin;
+        const step = yRange / steps;
+
+        for (let i = 0; i <= steps; i++) {
+            const y = yMin + i * step;
+            let density = 0;
+            for (const v of values) {
+                const u = (y - v) / (bandwidth * (yRange / 10) + 0.001);
+                density += Math.exp(-0.5 * u * u);
+            }
+            density /= n * bandwidth * (yRange / 10) * Math.sqrt(2 * Math.PI) + 0.001;
+            result.push({ y, density });
+        }
+
+        return result;
+    }
+
+    private renderVerticalBoxplot(data: BoxplotData[], width: number, height: number): void {
+        const settings = this.settings.boxplot;
+        const margin = { top: 30, right: 30, bottom: 80, left: 70 };
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+
+        const g = this.mainGroup
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        let yDomain: [number, number];
+        
+        if (settings.yAxisMode === "manual") {
+            yDomain = [settings.yAxisMin, settings.yAxisMax];
+        } else {
+            const allValues = data.flatMap(d => d.values);
+            const allOutliers = settings.showOutliers && settings.outlierStyle !== "hidden" 
+                ? data.flatMap(d => d.outliers) 
+                : [];
+            
+            const valuesForExtent = settings.showOutliers && settings.outlierStyle !== "hidden"
+                ? [...allValues, ...allOutliers]
+                : data.flatMap(d => [d.min, d.max]);
+            
+            const yExtent = d3.extent(valuesForExtent) as [number, number];
+            const paddingPercent = settings.yAxisPadding / 100;
+            const yPadding = (yExtent[1] - yExtent[0]) * paddingPercent || 1;
+            yDomain = [yExtent[0] - yPadding, yExtent[1] + yPadding];
+        }
+
+        const y = d3.scaleLinear()
+            .domain(yDomain)
+            .range([innerHeight, 0]);
+
+        const hasSubCategory = data.some(d => d.subCategory);
+        const categories = [...new Set(data.map(d => d.category))];
+
+        const xCategory = d3.scaleBand()
+            .domain(categories)
+            .range([0, innerWidth])
+            .padding(0.3);
+
+        let xSubCategory: d3.ScaleBand<string> | null = null;
+        if (hasSubCategory) {
+            xSubCategory = d3.scaleBand()
+                .domain([...new Set(data.map(d => d.subCategory))])
+                .range([0, xCategory.bandwidth()])
+                .padding(0.1);
+        }
+
+        if (settings.showGridlines) {
+            g.append("g")
+                .attr("class", "gridlines")
+                .call(d3.axisLeft(y).ticks(10).tickSize(-innerWidth).tickFormat(() => ""))
+                .selectAll("line")
+                .attr("stroke", settings.gridlineColor)
+                .attr("stroke-dasharray", "2,2");
+            g.select(".gridlines").select(".domain").remove();
+        }
+
+        if (settings.showAxis) {
+            g.append("g")
+                .attr("class", "y-axis")
+                .call(d3.axisLeft(y).ticks(10))
+                .selectAll("text")
+                .attr("fill", settings.axisColor)
+                .style("font-size", `${settings.axisFontSize}px`);
+
+            g.append("g")
+                .attr("class", "x-axis")
+                .attr("transform", `translate(0, ${innerHeight})`)
+                .call(d3.axisBottom(xCategory))
+                .selectAll("text")
+                .attr("fill", settings.axisColor)
+                .style("font-size", `${settings.axisFontSize}px`)
+                .attr("transform", "rotate(-45)")
+                .attr("text-anchor", "end")
+                .attr("dx", "-0.5em")
+                .attr("dy", "0.5em");
+        }
+
+        if (settings.showYAxisTitle && settings.yAxisTitle) {
+            g.append("text")
+                .attr("class", "y-axis-title")
+                .attr("transform", "rotate(-90)")
+                .attr("x", -innerHeight / 2)
+                .attr("y", -50)
+                .attr("text-anchor", "middle")
+                .attr("fill", settings.axisColor)
+                .style("font-size", `${settings.axisFontSize + 2}px`)
+                .text(settings.yAxisTitle);
+        }
+
+        if (settings.showDistribution) {
+            this.renderDistributionOverlay(g, data, xCategory, xSubCategory, y, innerHeight, hasSubCategory);
+        }
+
+        const boxGroups = g.selectAll(".box-group")
+            .data(data)
+            .enter()
+            .append("g")
+            .attr("class", "box-group")
+            .attr("transform", d => {
+                const xCat = xCategory(d.category)!;
+                if (hasSubCategory && xSubCategory) {
+                    return `translate(${xCat + xSubCategory(d.subCategory)! + xSubCategory.bandwidth() / 2}, 0)`;
+                }
+                return `translate(${xCat + xCategory.bandwidth() / 2}, 0)`;
+            });
+
+        const boxWidth = hasSubCategory && xSubCategory
+            ? xSubCategory.bandwidth() * settings.boxWidth
+            : xCategory.bandwidth() * settings.boxWidth;
+
+        boxGroups.each((d, i, nodes) => {
+            const group = d3.select(nodes[i]);
+            const boxColor = settings.useCategoryColors
+                ? this.colorPalette(d.category)
+                : settings.boxColor;
+
+            this.drawWhiskers(group, d, y, boxWidth, settings);
+            this.drawBox(group, d, y, boxWidth, boxColor, settings);
+
+            if (settings.showMedian) {
+                this.drawMedian(group, d, y, boxWidth, settings);
+            }
+
+            if (settings.showMean) {
+                this.drawMean(group, d, y, settings);
+            }
+
+            if (settings.showConfidenceInterval) {
+                this.drawConfidenceInterval(group, d, y, boxWidth, settings);
+            }
+
+            if (settings.showOutliers && settings.outlierStyle !== "hidden") {
+                this.drawOutliers(group, d, y, boxWidth, settings);
+            }
+        });
+
+        if (settings.showMeanLine || settings.showMedianLine) {
+            this.drawTrendLines(g, data, xCategory, xSubCategory, y, hasSubCategory, settings);
+        }
+
+        if (settings.showStatistics) {
+            boxGroups.each((d, i, nodes) => {
+                const group = d3.select(nodes[i]);
+                const statsText = [
+                    `n=${d.count}`,
+                    `Min: ${d.min.toFixed(2)}`,
+                    `Max: ${d.max.toFixed(2)}`,
+                    `Med: ${d.median.toFixed(2)}`,
+                    `Mean: ${d.mean.toFixed(2)}`
+                ];
+                
+                group.append("text")
+                    .attr("class", "stats-label")
+                    .attr("x", boxWidth / 2 + 5)
+                    .attr("y", y(d.max) - 5)
+                    .attr("fill", settings.labelColor)
+                    .style("font-size", `${settings.labelFontSize}px`)
+                    .selectAll("tspan")
+                    .data(statsText)
+                    .enter()
+                    .append("tspan")
+                    .attr("x", boxWidth / 2 + 5)
+                    .attr("dy", (text, idx) => idx === 0 ? 0 : settings.labelFontSize + 2)
+                    .text(text => text);
+            });
+        }
+
+        if (settings.showReferenceLine) {
+            this.drawReferenceLine(g, y, innerWidth, innerHeight, settings);
+        }
+    }
+
+    private renderHorizontalBoxplot(data: BoxplotData[], width: number, height: number): void {
+        const settings = this.settings.boxplot;
+        const margin = { top: 30, right: 70, bottom: 30, left: 80 };
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+
+        const g = this.mainGroup
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        let xDomain: [number, number];
+        
+        if (settings.yAxisMode === "manual") {
+            xDomain = [settings.yAxisMin, settings.yAxisMax];
+        } else {
+            const allValues = data.flatMap(d => d.values);
+            const allOutliers = settings.showOutliers && settings.outlierStyle !== "hidden" 
+                ? data.flatMap(d => d.outliers) 
+                : [];
+            
+            const valuesForExtent = settings.showOutliers && settings.outlierStyle !== "hidden"
+                ? [...allValues, ...allOutliers]
+                : data.flatMap(d => [d.min, d.max]);
+            
+            const xExtent = d3.extent(valuesForExtent) as [number, number];
+            const paddingPercent = settings.yAxisPadding / 100;
+            const xPadding = (xExtent[1] - xExtent[0]) * paddingPercent || 1;
+            xDomain = [xExtent[0] - xPadding, xExtent[1] + xPadding];
+        }
+
+        const x = d3.scaleLinear()
+            .domain(xDomain)
+            .range([0, innerWidth]);
+
+        const hasSubCategory = data.some(d => d.subCategory);
+        const categories = [...new Set(data.map(d => d.category))];
+
+        const yCategory = d3.scaleBand()
+            .domain(categories)
+            .range([0, innerHeight])
+            .padding(0.3);
+
+        let ySubCategory: d3.ScaleBand<string> | null = null;
+        if (hasSubCategory) {
+            ySubCategory = d3.scaleBand()
+                .domain([...new Set(data.map(d => d.subCategory))])
+                .range([0, yCategory.bandwidth()])
+                .padding(0.1);
+        }
+
+        if (settings.showGridlines) {
+            g.append("g")
+                .attr("class", "gridlines")
+                .call(d3.axisBottom(x).ticks(10).tickSize(-innerHeight).tickFormat(() => ""))
+                .selectAll("line")
+                .attr("stroke", settings.gridlineColor)
+                .attr("stroke-dasharray", "2,2");
+            g.select(".gridlines").select(".domain").remove();
+        }
+
+        if (settings.showAxis) {
+            g.append("g")
+                .attr("class", "x-axis")
+                .attr("transform", `translate(0, ${innerHeight})`)
+                .call(d3.axisBottom(x).ticks(10))
+                .selectAll("text")
+                .attr("fill", settings.axisColor)
+                .style("font-size", `${settings.axisFontSize}px`);
+
+            g.append("g")
+                .attr("class", "y-axis")
+                .call(d3.axisLeft(yCategory))
+                .selectAll("text")
+                .attr("fill", settings.axisColor)
+                .style("font-size", `${settings.axisFontSize}px`);
+        }
+
+        if (settings.showDistribution) {
+            this.renderDistributionOverlayHorizontal(g, data, yCategory, ySubCategory, x, innerWidth, hasSubCategory);
+        }
+
+        const boxGroups = g.selectAll(".box-group")
+            .data(data)
+            .enter()
+            .append("g")
+            .attr("class", "box-group")
+            .attr("transform", d => {
+                const yCat = yCategory(d.category)!;
+                if (hasSubCategory && ySubCategory) {
+                    return `translate(0, ${yCat + ySubCategory(d.subCategory)! + ySubCategory.bandwidth() / 2})`;
+                }
+                return `translate(0, ${yCat + yCategory.bandwidth() / 2})`;
+            });
+
+        const boxHeight = hasSubCategory && ySubCategory
+            ? ySubCategory.bandwidth() * settings.boxWidth
+            : yCategory.bandwidth() * settings.boxWidth;
+
+        boxGroups.each((d, i, nodes) => {
+            const group = d3.select(nodes[i]);
+            const boxColor = settings.useCategoryColors
+                ? this.colorPalette(d.category)
+                : settings.boxColor;
+
+            this.drawWhiskersHorizontal(group, d, x, boxHeight, settings);
+            this.drawBoxHorizontal(group, d, x, boxHeight, boxColor, settings);
+
+            if (settings.showMedian) {
+                this.drawMedianHorizontal(group, d, x, boxHeight, settings);
+            }
+
+            if (settings.showMean) {
+                this.drawMeanHorizontal(group, d, x, settings);
+            }
+
+            if (settings.showConfidenceInterval) {
+                this.drawConfidenceIntervalHorizontal(group, d, x, boxHeight, settings);
+            }
+
+            if (settings.showOutliers && settings.outlierStyle !== "hidden") {
+                this.drawOutliersHorizontal(group, d, x, boxHeight, settings);
+            }
+        });
+
+        if (settings.showMeanLine || settings.showMedianLine) {
+            this.drawTrendLinesHorizontal(g, data, yCategory, ySubCategory, x, hasSubCategory, settings);
+        }
+
+        if (settings.showStatistics) {
+            boxGroups.each((d, i, nodes) => {
+                const group = d3.select(nodes[i]);
+                const statsText = [
+                    `n=${d.count}`,
+                    `Min: ${d.min.toFixed(2)}`,
+                    `Max: ${d.max.toFixed(2)}`,
+                    `Med: ${d.median.toFixed(2)}`,
+                    `Mean: ${d.mean.toFixed(2)}`
+                ];
+                
+                group.append("text")
+                    .attr("class", "stats-label")
+                    .attr("x", x(d.max) + 5)
+                    .attr("y", -boxHeight / 2)
+                    .attr("fill", settings.labelColor)
+                    .style("font-size", `${settings.labelFontSize}px`)
+                    .selectAll("tspan")
+                    .data(statsText)
+                    .enter()
+                    .append("tspan")
+                    .attr("x", x(d.max) + 5)
+                    .attr("dy", (text, idx) => idx === 0 ? 0 : settings.labelFontSize + 2)
+                    .text(text => text);
+            });
+        }
+
+        if (settings.showReferenceLine) {
+            this.drawReferenceLineHorizontal(g, x, innerWidth, innerHeight, settings);
+        }
+    }
+
+    private drawWhiskers(group: Selection<SVGGElement>, d: BoxplotData, y: d3.ScaleLinear<number, number>, boxWidth: number, settings: BoxplotSettings): void {
+        const dasharray = this.getStrokeDasharray(settings.whiskerStyle === "dashed" ? "dashed" : settings.strokeStyle);
+
+        group.append("line")
+            .attr("class", "whisker")
+            .attr("x1", 0)
+            .attr("x2", 0)
+            .attr("y1", y(d.min))
+            .attr("y2", y(d.q1))
+            .attr("stroke", settings.whiskerColor)
+            .attr("stroke-width", settings.whiskerWidth)
+            .attr("stroke-dasharray", dasharray);
+
+        group.append("line")
+            .attr("class", "whisker")
+            .attr("x1", 0)
+            .attr("x2", 0)
+            .attr("y1", y(d.max))
+            .attr("y2", y(d.q3))
+            .attr("stroke", settings.whiskerColor)
+            .attr("stroke-width", settings.whiskerWidth)
+            .attr("stroke-dasharray", dasharray);
+
+        if (settings.whiskerStyle === "T") {
+            const capW = boxWidth * settings.capWidth / 2;
+            group.append("line")
+                .attr("class", "whisker-cap")
+                .attr("x1", -capW)
+                .attr("x2", capW)
+                .attr("y1", y(d.min))
+                .attr("y2", y(d.min))
+                .attr("stroke", settings.whiskerColor)
+                .attr("stroke-width", settings.whiskerWidth);
+
+            group.append("line")
+                .attr("class", "whisker-cap")
+                .attr("x1", -capW)
+                .attr("x2", capW)
+                .attr("y1", y(d.max))
+                .attr("y2", y(d.max))
+                .attr("stroke", settings.whiskerColor)
+                .attr("stroke-width", settings.whiskerWidth);
+        }
+    }
+
+    private drawWhiskersHorizontal(group: Selection<SVGGElement>, d: BoxplotData, x: d3.ScaleLinear<number, number>, boxHeight: number, settings: BoxplotSettings): void {
+        const dasharray = this.getStrokeDasharray(settings.whiskerStyle === "dashed" ? "dashed" : settings.strokeStyle);
+
+        group.append("line")
+            .attr("class", "whisker")
+            .attr("x1", x(d.min))
+            .attr("x2", x(d.q1))
+            .attr("y1", 0)
+            .attr("y2", 0)
+            .attr("stroke", settings.whiskerColor)
+            .attr("stroke-width", settings.whiskerWidth)
+            .attr("stroke-dasharray", dasharray);
+
+        group.append("line")
+            .attr("class", "whisker")
+            .attr("x1", x(d.max))
+            .attr("x2", x(d.q3))
+            .attr("y1", 0)
+            .attr("y2", 0)
+            .attr("stroke", settings.whiskerColor)
+            .attr("stroke-width", settings.whiskerWidth)
+            .attr("stroke-dasharray", dasharray);
+
+        if (settings.whiskerStyle === "T") {
+            const capH = boxHeight * settings.capWidth / 2;
+            group.append("line")
+                .attr("class", "whisker-cap")
+                .attr("x1", x(d.min))
+                .attr("x2", x(d.min))
+                .attr("y1", -capH)
+                .attr("y2", capH)
+                .attr("stroke", settings.whiskerColor)
+                .attr("stroke-width", settings.whiskerWidth);
+
+            group.append("line")
+                .attr("class", "whisker-cap")
+                .attr("x1", x(d.max))
+                .attr("x2", x(d.max))
+                .attr("y1", -capH)
+                .attr("y2", capH)
+                .attr("stroke", settings.whiskerColor)
+                .attr("stroke-width", settings.whiskerWidth);
+        }
+    }
+
+    private drawBox(group: Selection<SVGGElement>, d: BoxplotData, y: d3.ScaleLinear<number, number>, boxWidth: number, boxColor: string, settings: BoxplotSettings): void {
+        const boxHeight = y(d.q1) - y(d.q3);
+        const radius = settings.boxBorderRadius || 0;
+
+        const rect = group.append("rect")
+            .attr("class", "box")
+            .attr("x", -boxWidth / 2)
+            .attr("y", y(d.q3))
+            .attr("width", boxWidth)
+            .attr("height", boxHeight)
+            .attr("fill", boxColor)
+            .attr("fill-opacity", settings.boxOpacity)
+            .attr("stroke", settings.whiskerColor)
+            .attr("stroke-width", settings.strokeWidth)
+            .attr("stroke-dasharray", this.getStrokeDasharray(settings.strokeStyle));
+
+        if (radius > 0) {
+            rect.attr("rx", radius).attr("ry", radius);
+        }
+
+        if (settings.boxFillStyle === "striped") {
+            const patternId = `stripe-${d.category.replace(/\s/g, "")}`;
+            const defs = group.append("defs");
+            const pattern = defs.append("pattern")
+                .attr("id", patternId)
+                .attr("patternUnits", "userSpaceOnUse")
+                .attr("width", 8)
+                .attr("height", 8);
+            pattern.append("rect")
+                .attr("width", 8)
+                .attr("height", 8)
+                .attr("fill", boxColor)
+                .attr("fill-opacity", settings.boxOpacity);
+            pattern.append("line")
+                .attr("x1", 0).attr("y1", 0)
+                .attr("x2", 8).attr("y2", 8)
+                .attr("stroke", settings.whiskerColor)
+                .attr("stroke-width", 1)
+                .attr("stroke-opacity", 0.3);
+            rect.attr("fill", `url(#${patternId})`);
+        } else if (settings.boxFillStyle === "gradient") {
+            const gradId = `grad-${d.category.replace(/\s/g, "")}`;
+            const defs = group.append("defs");
+            const gradient = defs.append("linearGradient")
+                .attr("id", gradId)
+                .attr("x1", "0%").attr("y1", "0%")
+                .attr("x2", "0%").attr("y2", "100%");
+            gradient.append("stop")
+                .attr("offset", "0%")
+                .attr("stop-color", d3.color(boxColor)!.brighter(0.5).formatRgb());
+            gradient.append("stop")
+                .attr("offset", "100%")
+                .attr("stop-color", d3.color(boxColor)!.darker(0.5).formatRgb());
+            rect.attr("fill", `url(#${gradId})`);
+        }
+    }
+
+    private drawBoxHorizontal(group: Selection<SVGGElement>, d: BoxplotData, x: d3.ScaleLinear<number, number>, boxHeight: number, boxColor: string, settings: BoxplotSettings): void {
+        const boxWidth = x(d.q3) - x(d.q1);
+        const radius = settings.boxBorderRadius || 0;
+
+        const rect = group.append("rect")
+            .attr("class", "box")
+            .attr("x", x(d.q1))
+            .attr("y", -boxHeight / 2)
+            .attr("width", boxWidth)
+            .attr("height", boxHeight)
+            .attr("fill", boxColor)
+            .attr("fill-opacity", settings.boxOpacity)
+            .attr("stroke", settings.whiskerColor)
+            .attr("stroke-width", settings.strokeWidth)
+            .attr("stroke-dasharray", this.getStrokeDasharray(settings.strokeStyle));
+
+        if (radius > 0) {
+            rect.attr("rx", radius).attr("ry", radius);
+        }
+
+        if (settings.boxFillStyle === "gradient") {
+            const gradId = `grad-${d.category.replace(/\s/g, "")}`;
+            const defs = group.append("defs");
+            const gradient = defs.append("linearGradient")
+                .attr("id", gradId)
+                .attr("x1", "0%").attr("y1", "0%")
+                .attr("x2", "100%").attr("y2", "0%");
+            gradient.append("stop")
+                .attr("offset", "0%")
+                .attr("stop-color", d3.color(boxColor)!.brighter(0.5).formatRgb());
+            gradient.append("stop")
+                .attr("offset", "100%")
+                .attr("stop-color", d3.color(boxColor)!.darker(0.5).formatRgb());
+            rect.attr("fill", `url(#${gradId})`);
+        }
+    }
+
+    private drawMedian(group: Selection<SVGGElement>, d: BoxplotData, y: d3.ScaleLinear<number, number>, boxWidth: number, settings: BoxplotSettings): void {
+        group.append("line")
+            .attr("class", "median")
+            .attr("x1", -boxWidth / 2)
+            .attr("x2", boxWidth / 2)
+            .attr("y1", y(d.median))
+            .attr("y2", y(d.median))
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", settings.medianWidth);
+    }
+
+    private drawMedianHorizontal(group: Selection<SVGGElement>, d: BoxplotData, x: d3.ScaleLinear<number, number>, boxHeight: number, settings: BoxplotSettings): void {
+        group.append("line")
+            .attr("class", "median")
+            .attr("x1", x(d.median))
+            .attr("x2", x(d.median))
+            .attr("y1", -boxHeight / 2)
+            .attr("y2", boxHeight / 2)
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", settings.medianWidth);
+    }
+
+    private drawMean(group: Selection<SVGGElement>, d: BoxplotData, y: d3.ScaleLinear<number, number>, settings: BoxplotSettings): void {
+        const size = settings.meanSize;
+        if (settings.meanShape === "circle") {
+            group.append("circle")
+                .attr("class", "mean")
+                .attr("cx", 0)
+                .attr("cy", y(d.mean))
+                .attr("r", size)
+                .attr("fill", settings.meanColor);
+        } else {
+            group.append("path")
+                .attr("class", "mean")
+                .attr("d", this.getMeanPath(settings.meanShape, 0, y(d.mean), size))
+                .attr("fill", settings.meanColor);
+        }
+    }
+
+    private drawMeanHorizontal(group: Selection<SVGGElement>, d: BoxplotData, x: d3.ScaleLinear<number, number>, settings: BoxplotSettings): void {
+        const size = settings.meanSize;
+        if (settings.meanShape === "circle") {
+            group.append("circle")
+                .attr("class", "mean")
+                .attr("cx", x(d.mean))
+                .attr("cy", 0)
+                .attr("r", size)
+                .attr("fill", settings.meanColor);
+        } else {
+            group.append("path")
+                .attr("class", "mean")
+                .attr("d", this.getMeanPath(settings.meanShape, x(d.mean), 0, size))
+                .attr("fill", settings.meanColor);
+        }
+    }
+
+    private drawConfidenceInterval(group: Selection<SVGGElement>, d: BoxplotData, y: d3.ScaleLinear<number, number>, boxWidth: number, settings: BoxplotSettings): void {
+        const [ciLow, ciHigh] = d.confidenceInterval;
+        group.append("line")
+            .attr("class", "ci-line")
+            .attr("x1", -boxWidth / 4)
+            .attr("x2", boxWidth / 4)
+            .attr("y1", y(ciLow))
+            .attr("y2", y(ciHigh))
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", "3,3");
+
+        group.append("line")
+            .attr("class", "ci-cap")
+            .attr("x1", -boxWidth / 6)
+            .attr("x2", boxWidth / 6)
+            .attr("y1", y(ciLow))
+            .attr("y2", y(ciLow))
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", 1.5);
+
+        group.append("line")
+            .attr("class", "ci-cap")
+            .attr("x1", -boxWidth / 6)
+            .attr("x2", boxWidth / 6)
+            .attr("y1", y(ciHigh))
+            .attr("y2", y(ciHigh))
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", 1.5);
+    }
+
+    private drawConfidenceIntervalHorizontal(group: Selection<SVGGElement>, d: BoxplotData, x: d3.ScaleLinear<number, number>, boxHeight: number, settings: BoxplotSettings): void {
+        const [ciLow, ciHigh] = d.confidenceInterval;
+        group.append("line")
+            .attr("class", "ci-line")
+            .attr("x1", x(ciLow))
+            .attr("x2", x(ciHigh))
+            .attr("y1", -boxHeight / 4)
+            .attr("y2", -boxHeight / 4)
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", "3,3");
+
+        group.append("line")
+            .attr("class", "ci-cap")
+            .attr("x1", x(ciLow))
+            .attr("x2", x(ciLow))
+            .attr("y1", -boxHeight / 6)
+            .attr("y2", boxHeight / 6)
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", 1.5);
+
+        group.append("line")
+            .attr("class", "ci-cap")
+            .attr("x1", x(ciHigh))
+            .attr("x2", x(ciHigh))
+            .attr("y1", -boxHeight / 6)
+            .attr("y2", boxHeight / 6)
+            .attr("stroke", settings.medianColor)
+            .attr("stroke-width", 1.5);
+    }
+
+    private drawOutliers(group: Selection<SVGGElement>, d: BoxplotData, y: d3.ScaleLinear<number, number>, boxWidth: number, settings: BoxplotSettings): void {
+        if (d.outliers.length === 0) return;
+
+        const maxDeviation = Math.max(...d.outliers.map(o => Math.abs(o - d.median)));
+
+        group.selectAll(".outlier")
+            .data(d.outliers)
+            .enter()
+            .append("g")
+            .attr("class", "outlier")
+            .each((outlier, i, nodes) => {
+                const g = d3.select(nodes[i]);
+                const jitterX = settings.jitterOutliers
+                    ? (Math.random() - 0.5) * boxWidth * settings.jitterAmount
+                    : 0;
+
+                let color = settings.outlierColor;
+                if (settings.colorByDeviation && maxDeviation > 0) {
+                    const deviation = Math.abs(outlier - d.median) / maxDeviation;
+                    const c = d3.color(settings.outlierColor)!;
+                    color = d3.interpolateRgb(c.formatRgb(), "#ff0000")(deviation);
+                }
+
+                if (settings.outlierStyle === "circle") {
+                    g.append("circle")
+                        .attr("cx", jitterX)
+                        .attr("cy", y(outlier))
+                        .attr("r", settings.outlierSize)
+                        .attr("fill", color)
+                        .attr("stroke", settings.outlierStroke)
+                        .attr("stroke-width", settings.outlierStrokeWidth);
+                } else {
+                    g.append("path")
+                        .attr("d", this.getOutlierPath(settings.outlierStyle, jitterX, y(outlier), settings.outlierSize))
+                        .attr("fill", "none")
+                        .attr("stroke", color)
+                        .attr("stroke-width", settings.outlierStrokeWidth + 1);
+                }
+            });
+    }
+
+    private drawOutliersHorizontal(group: Selection<SVGGElement>, d: BoxplotData, x: d3.ScaleLinear<number, number>, boxHeight: number, settings: BoxplotSettings): void {
+        if (d.outliers.length === 0) return;
+
+        const maxDeviation = Math.max(...d.outliers.map(o => Math.abs(o - d.median)));
+
+        group.selectAll(".outlier")
+            .data(d.outliers)
+            .enter()
+            .append("g")
+            .attr("class", "outlier")
+            .each((outlier, i, nodes) => {
+                const g = d3.select(nodes[i]);
+                const jitterY = settings.jitterOutliers
+                    ? (Math.random() - 0.5) * boxHeight * settings.jitterAmount
+                    : 0;
+
+                let color = settings.outlierColor;
+                if (settings.colorByDeviation && maxDeviation > 0) {
+                    const deviation = Math.abs(outlier - d.median) / maxDeviation;
+                    const c = d3.color(settings.outlierColor)!;
+                    color = d3.interpolateRgb(c.formatRgb(), "#ff0000")(deviation);
+                }
+
+                if (settings.outlierStyle === "circle") {
+                    g.append("circle")
+                        .attr("cx", x(outlier))
+                        .attr("cy", jitterY)
+                        .attr("r", settings.outlierSize)
+                        .attr("fill", color)
+                        .attr("stroke", settings.outlierStroke)
+                        .attr("stroke-width", settings.outlierStrokeWidth);
+                } else {
+                    g.append("path")
+                        .attr("d", this.getOutlierPath(settings.outlierStyle, x(outlier), jitterY, settings.outlierSize))
+                        .attr("fill", "none")
+                        .attr("stroke", color)
+                        .attr("stroke-width", settings.outlierStrokeWidth + 1);
+                }
+            });
+    }
+
+    private drawTrendLines(
+        g: Selection<SVGGElement>,
+        data: BoxplotData[],
+        xCategory: d3.ScaleBand<string>,
+        _xSubCategory: d3.ScaleBand<string> | null,
+        y: d3.ScaleLinear<number, number>,
+        _hasSubCategory: boolean,
+        settings: BoxplotSettings
+    ): void {
+        const categories = [...new Set(data.map(d => d.category))];
+
+        if (settings.showMeanLine) {
+            const meanPoints = categories.map(cat => {
+                const catData = data.filter(d => d.category === cat);
+                const avgMean = d3.mean(catData, d => d.mean) as number;
+                const xPos = xCategory(cat)! + xCategory.bandwidth() / 2;
+                return { x: xPos, y: y(avgMean) };
+            });
+
+            const line = d3.line<{ x: number; y: number }>()
+                .x(d => d.x)
+                .y(d => d.y)
+                .curve(d3.curveMonotoneX);
+
+            g.append("path")
+                .datum(meanPoints)
+                .attr("class", "mean-trend-line")
+                .attr("d", line as any)
+                .attr("fill", "none")
+                .attr("stroke", settings.trendLineColor)
+                .attr("stroke-width", settings.trendLineWidth)
+                .attr("stroke-dasharray", "5,3");
+        }
+
+        if (settings.showMedianLine) {
+            const medianPoints = categories.map(cat => {
+                const catData = data.filter(d => d.category === cat);
+                const avgMedian = d3.mean(catData, d => d.median) as number;
+                const xPos = xCategory(cat)! + xCategory.bandwidth() / 2;
+                return { x: xPos, y: y(avgMedian) };
+            });
+
+            const line = d3.line<{ x: number; y: number }>()
+                .x(d => d.x)
+                .y(d => d.y)
+                .curve(d3.curveMonotoneX);
+
+            g.append("path")
+                .datum(medianPoints)
+                .attr("class", "median-trend-line")
+                .attr("d", line as any)
+                .attr("fill", "none")
+                .attr("stroke", settings.medianColor)
+                .attr("stroke-width", settings.trendLineWidth)
+                .attr("stroke-dasharray", "3,3");
+        }
+    }
+
+    private drawTrendLinesHorizontal(
+        g: Selection<SVGGElement>,
+        data: BoxplotData[],
+        yCategory: d3.ScaleBand<string>,
+        _ySubCategory: d3.ScaleBand<string> | null,
+        x: d3.ScaleLinear<number, number>,
+        _hasSubCategory: boolean,
+        settings: BoxplotSettings
+    ): void {
+        const categories = [...new Set(data.map(d => d.category))];
+
+        if (settings.showMeanLine) {
+            const meanPoints = categories.map(cat => {
+                const catData = data.filter(d => d.category === cat);
+                const avgMean = d3.mean(catData, d => d.mean) as number;
+                const yPos = yCategory(cat)! + yCategory.bandwidth() / 2;
+                return { x: x(avgMean), y: yPos };
+            });
+
+            const line = d3.line<{ x: number; y: number }>()
+                .x(d => d.x)
+                .y(d => d.y)
+                .curve(d3.curveMonotoneY);
+
+            g.append("path")
+                .datum(meanPoints)
+                .attr("class", "mean-trend-line")
+                .attr("d", line as any)
+                .attr("fill", "none")
+                .attr("stroke", settings.trendLineColor)
+                .attr("stroke-width", settings.trendLineWidth)
+                .attr("stroke-dasharray", "5,3");
+        }
+
+        if (settings.showMedianLine) {
+            const medianPoints = categories.map(cat => {
+                const catData = data.filter(d => d.category === cat);
+                const avgMedian = d3.mean(catData, d => d.median) as number;
+                const yPos = yCategory(cat)! + yCategory.bandwidth() / 2;
+                return { x: x(avgMedian), y: yPos };
+            });
+
+            const line = d3.line<{ x: number; y: number }>()
+                .x(d => d.x)
+                .y(d => d.y)
+                .curve(d3.curveMonotoneY);
+
+            g.append("path")
+                .datum(medianPoints)
+                .attr("class", "median-trend-line")
+                .attr("d", line as any)
+                .attr("fill", "none")
+                .attr("stroke", settings.medianColor)
+                .attr("stroke-width", settings.trendLineWidth)
+                .attr("stroke-dasharray", "3,3");
+        }
+    }
+
+    private renderDistributionOverlay(
+        g: Selection<SVGGElement>,
+        data: BoxplotData[],
+        xCategory: d3.ScaleBand<string>,
+        _xSubCategory: d3.ScaleBand<string> | null,
+        y: d3.ScaleLinear<number, number>,
+        _innerHeight: number,
+        _hasSubCategory: boolean
+    ): void {
+        const settings = this.settings.boxplot;
+        const yDomain = y.domain();
+
+        if (settings.distributionType === "violin") {
+            const categories = [...new Set(data.map(d => d.category))];
+            categories.forEach(cat => {
+                const catData = data.filter(d => d.category === cat);
+                const catValues = catData.flatMap(d => d.values);
+                const catKde = this.computeKDE(catValues, settings.bandwidth, yDomain[0], yDomain[1]);
+                const catMaxDensity = d3.max(catKde, d => d.density) || 1;
+                const catDensityScale = d3.scaleLinear().domain([0, catMaxDensity]).range([0, Math.min(xCategory.bandwidth() * 0.3, 50)]);
+
+                const catArea = d3.area<{ y: number; density: number }>()
+                    .x0(d => -catDensityScale(d.density))
+                    .x1(d => catDensityScale(d.density))
+                    .y(d => y(d.y))
+                    .curve(d3.curveCatmullRom.alpha(0.5));
+
+                const xPos = xCategory(cat)! + xCategory.bandwidth() / 2;
+                g.append("path")
+                    .datum(catKde)
+                    .attr("class", "violin")
+                    .attr("d", catArea as any)
+                    .attr("transform", `translate(${xPos}, 0)`)
+                    .attr("fill", this.colorPalette(cat))
+                    .attr("fill-opacity", settings.distributionOpacity)
+                    .attr("stroke", "none");
+            });
+        } else if (settings.distributionType === "histogram") {
+            const histogram = d3.histogram()
+                .domain(yDomain as any)
+                .thresholds(settings.histogramBins);
+
+            const bins = histogram(data.flatMap(d => d.values));
+            const maxCount = d3.max(bins, b => b.length) || 1;
+            const countScale = d3.scaleLinear().domain([0, maxCount]).range([0, Math.min(xCategory.bandwidth() * 0.3, 50)]);
+
+            bins.forEach((bin) => {
+                const barHeight = y(bin.x0) - y(bin.x1);
+                const barWidth_scaled = countScale(bin.length);
+                g.append("rect")
+                    .attr("x", -barWidth_scaled / 2)
+                    .attr("y", y(bin.x1))
+                    .attr("width", barWidth_scaled)
+                    .attr("height", barHeight)
+                    .attr("fill", settings.distributionColor)
+                    .attr("fill-opacity", settings.distributionOpacity * 0.5)
+                    .attr("stroke", "none");
+            });
+        }
+    }
+
+    private renderDistributionOverlayHorizontal(
+        g: Selection<SVGGElement>,
+        data: BoxplotData[],
+        yCategory: d3.ScaleBand<string>,
+        _ySubCategory: d3.ScaleBand<string> | null,
+        x: d3.ScaleLinear<number, number>,
+        _innerWidth: number,
+        _hasSubCategory: boolean
+    ): void {
+        const settings = this.settings.boxplot;
+        const xDomain = x.domain();
+
+        if (settings.distributionType === "violin") {
+            const categories = [...new Set(data.map(d => d.category))];
+            categories.forEach(cat => {
+                const catData = data.filter(d => d.category === cat);
+                const catValues = catData.flatMap(d => d.values);
+                const catKde = this.computeKDE(catValues, settings.bandwidth, xDomain[0], xDomain[1]);
+                const catMaxDensity = d3.max(catKde, d => d.density) || 1;
+                const catDensityScale = d3.scaleLinear().domain([0, catMaxDensity]).range([0, Math.min(yCategory.bandwidth() * 0.3, 50)]);
+
+                const area = d3.area<{ y: number; density: number }>()
+                    .x(d => x(d.y))
+                    .y0(d => -catDensityScale(d.density))
+                    .y1(d => catDensityScale(d.density))
+                    .curve(d3.curveCatmullRom.alpha(0.5));
+
+                const yPos = yCategory(cat)! + yCategory.bandwidth() / 2;
+                g.append("path")
+                    .datum(catKde)
+                    .attr("class", "violin")
+                    .attr("d", area as any)
+                    .attr("transform", `translate(0, ${yPos})`)
+                    .attr("fill", this.colorPalette(cat))
+                    .attr("fill-opacity", settings.distributionOpacity)
+                    .attr("stroke", "none");
+            });
+        }
+    }
+
+    private drawReferenceLine(
+        g: Selection<SVGGElement>,
+        y: d3.ScaleLinear<number, number>,
+        innerWidth: number,
+        _innerHeight: number,
+        settings: BoxplotSettings
+    ): void {
+        const dasharray = this.getStrokeDasharray(settings.referenceLineStyle);
+        g.append("line")
+            .attr("class", "reference-line")
+            .attr("x1", 0)
+            .attr("x2", innerWidth)
+            .attr("y1", y(settings.referenceLineValue))
+            .attr("y2", y(settings.referenceLineValue))
+            .attr("stroke", settings.referenceLineColor)
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", dasharray);
+
+        if (settings.referenceLineLabel) {
+            g.append("text")
+                .attr("class", "reference-label")
+                .attr("x", innerWidth - 5)
+                .attr("y", y(settings.referenceLineValue) - 5)
+                .attr("text-anchor", "end")
+                .attr("fill", settings.referenceLineColor)
+                .style("font-size", `${settings.axisFontSize - 2}px`)
+                .text(settings.referenceLineLabel);
+        }
+    }
+
+    private drawReferenceLineHorizontal(
+        g: Selection<SVGGElement>,
+        x: d3.ScaleLinear<number, number>,
+        _innerWidth: number,
+        innerHeight: number,
+        settings: BoxplotSettings
+    ): void {
+        const dasharray = this.getStrokeDasharray(settings.referenceLineStyle);
+        g.append("line")
+            .attr("class", "reference-line")
+            .attr("x1", x(settings.referenceLineValue))
+            .attr("x2", x(settings.referenceLineValue))
+            .attr("y1", 0)
+            .attr("y2", innerHeight)
+            .attr("stroke", settings.referenceLineColor)
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", dasharray);
+
+        if (settings.referenceLineLabel) {
+            g.append("text")
+                .attr("class", "reference-label")
+                .attr("x", x(settings.referenceLineValue) + 5)
+                .attr("y", 15)
+                .attr("text-anchor", "start")
+                .attr("fill", settings.referenceLineColor)
+                .style("font-size", `${settings.axisFontSize - 2}px`)
+                .text(settings.referenceLineLabel);
+        }
+    }
+
+    public enumerateObjectInstances(options: EnumerateVisualObjectInstancesOptions): VisualObjectInstanceEnumeration {
+        const settings = this.settings || VisualSettings.getDefault();
+        const s = settings.boxplot;
+        const objectName = options.objectName;
+        const enumeration: VisualObjectInstanceEnumeration = [];
+
+        const instance: any = {
+            objectName,
+            properties: {},
+            selector: null
+        };
+
+        switch (objectName) {
+            case "boxplot":
+                instance.properties = {
+                    boxColor: s.boxColor,
+                    useCategoryColors: s.useCategoryColors,
+                    boxFillStyle: s.boxFillStyle,
+                    boxBorderRadius: s.boxBorderRadius,
+                    boxOpacity: s.boxOpacity,
+                    boxWidth: s.boxWidth,
+                    strokeWidth: s.strokeWidth,
+                    strokeStyle: s.strokeStyle,
+                    showMedian: s.showMedian,
+                    medianColor: s.medianColor,
+                    medianWidth: s.medianWidth,
+                    showMean: s.showMean,
+                    meanColor: s.meanColor,
+                    meanShape: s.meanShape,
+                    meanSize: s.meanSize,
+                    showMeanLine: s.showMeanLine,
+                    showMedianLine: s.showMedianLine,
+                    trendLineColor: s.trendLineColor,
+                    trendLineWidth: s.trendLineWidth,
+                    percentileLower: s.percentileLower,
+                    percentileUpper: s.percentileUpper
+                };
+                break;
+            case "whiskers":
+                instance.properties = {
+                    whiskerColor: s.whiskerColor,
+                    whiskerStyle: s.whiskerStyle,
+                    whiskerWidth: s.whiskerWidth,
+                    capWidth: s.capWidth,
+                    whiskerMethod: s.whiskerMethod,
+                    stdDevMultiplier: s.stdDevMultiplier
+                };
+                break;
+            case "outliers":
+                instance.properties = {
+                    showOutliers: s.showOutliers,
+                    outlierStyle: s.outlierStyle,
+                    outlierColor: s.outlierColor,
+                    outlierSize: s.outlierSize,
+                    outlierStroke: s.outlierStroke,
+                    outlierStrokeWidth: s.outlierStrokeWidth,
+                    jitterOutliers: s.jitterOutliers,
+                    jitterAmount: s.jitterAmount,
+                    colorByDeviation: s.colorByDeviation
+                };
+                break;
+            case "distribution":
+                instance.properties = {
+                    showDistribution: s.showDistribution,
+                    distributionType: s.distributionType,
+                    distributionColor: s.distributionColor,
+                    distributionOpacity: s.distributionOpacity,
+                    bandwidth: s.bandwidth,
+                    histogramBins: s.histogramBins
+                };
+                break;
+            case "axis":
+                instance.properties = {
+                    orientation: s.orientation,
+                    showAxis: s.showAxis,
+                    showGridlines: s.showGridlines,
+                    gridlineColor: s.gridlineColor,
+                    axisColor: s.axisColor,
+                    axisFontSize: s.axisFontSize,
+                    yAxisTitle: s.yAxisTitle,
+                    showYAxisTitle: s.showYAxisTitle,
+                    yAxisMode: s.yAxisMode,
+                    yAxisMin: s.yAxisMin,
+                    yAxisMax: s.yAxisMax,
+                    yAxisPadding: s.yAxisPadding
+                };
+                break;
+            case "labels":
+                instance.properties = {
+                    showLabels: s.showLabels,
+                    labelColor: s.labelColor,
+                    labelFontSize: s.labelFontSize,
+                    showStatistics: s.showStatistics,
+                    showConfidenceInterval: s.showConfidenceInterval,
+                    confidenceLevel: s.confidenceLevel
+                };
+                break;
+            case "sorting":
+                instance.properties = {
+                    sortBy: s.sortBy,
+                    sortOrder: s.sortOrder
+                };
+                break;
+            case "referenceLines":
+                instance.properties = {
+                    showReferenceLine: s.showReferenceLine,
+                    referenceLineValue: s.referenceLineValue,
+                    referenceLineColor: s.referenceLineColor,
+                    referenceLineStyle: s.referenceLineStyle,
+                    referenceLineLabel: s.referenceLineLabel
+                };
+                break;
+        }
+
+        enumeration.push(instance);
+        return enumeration;
+    }
+}

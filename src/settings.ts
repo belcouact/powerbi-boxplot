@@ -1,0 +1,147 @@
+export interface BoxplotSettings {
+    boxColor: string;
+    useCategoryColors: boolean;
+    boxFillStyle: string;
+    boxBorderRadius: number;
+    boxOpacity: number;
+    boxWidth: number;
+    strokeWidth: number;
+    strokeStyle: string;
+    showMedian: boolean;
+    medianColor: string;
+    medianWidth: number;
+    showMean: boolean;
+    meanColor: string;
+    meanShape: string;
+    meanSize: number;
+    showMeanLine: boolean;
+    showMedianLine: boolean;
+    trendLineColor: string;
+    trendLineWidth: number;
+    percentileLower: number;
+    percentileUpper: number;
+    whiskerColor: string;
+    whiskerStyle: string;
+    whiskerWidth: number;
+    capWidth: number;
+    whiskerMethod: string;
+    stdDevMultiplier: number;
+    showOutliers: boolean;
+    outlierStyle: string;
+    outlierColor: string;
+    outlierSize: number;
+    outlierStroke: string;
+    outlierStrokeWidth: number;
+    jitterOutliers: boolean;
+    jitterAmount: number;
+    colorByDeviation: boolean;
+    showDistribution: boolean;
+    distributionType: string;
+    distributionColor: string;
+    distributionOpacity: number;
+    bandwidth: number;
+    histogramBins: number;
+    orientation: string;
+    showAxis: boolean;
+    showGridlines: boolean;
+    gridlineColor: string;
+    axisColor: string;
+    axisFontSize: number;
+    yAxisTitle: string;
+    showYAxisTitle: boolean;
+    yAxisMode: string;
+    yAxisMin: number;
+    yAxisMax: number;
+    yAxisPadding: number;
+    showLabels: boolean;
+    labelColor: string;
+    labelFontSize: number;
+    showStatistics: boolean;
+    showConfidenceInterval: boolean;
+    confidenceLevel: number;
+    sortBy: string;
+    sortOrder: string;
+    showReferenceLine: boolean;
+    referenceLineValue: number;
+    referenceLineColor: string;
+    referenceLineStyle: string;
+    referenceLineLabel: string;
+}
+
+export const defaultSettings: BoxplotSettings = {
+    boxColor: "#4292c6",
+    useCategoryColors: true,
+    boxFillStyle: "solid",
+    boxBorderRadius: 0,
+    boxOpacity: 0.7,
+    boxWidth: 0.5,
+    strokeWidth: 2,
+    strokeStyle: "solid",
+    showMedian: true,
+    medianColor: "#2171b5",
+    medianWidth: 3,
+    showMean: false,
+    meanColor: "#d62728",
+    meanShape: "circle",
+    meanSize: 5,
+    showMeanLine: false,
+    showMedianLine: false,
+    trendLineColor: "#ff7f0e",
+    trendLineWidth: 2,
+    percentileLower: 25,
+    percentileUpper: 75,
+    whiskerColor: "#08306b",
+    whiskerStyle: "T",
+    whiskerWidth: 2,
+    capWidth: 0.5,
+    whiskerMethod: "iqr",
+    stdDevMultiplier: 2,
+    showOutliers: true,
+    outlierStyle: "circle",
+    outlierColor: "#c94c4c",
+    outlierSize: 4,
+    outlierStroke: "#ffffff",
+    outlierStrokeWidth: 1,
+    jitterOutliers: false,
+    jitterAmount: 0.3,
+    colorByDeviation: false,
+    showDistribution: false,
+    distributionType: "violin",
+    distributionColor: "#4292c6",
+    distributionOpacity: 0.3,
+    bandwidth: 0.5,
+    histogramBins: 20,
+    orientation: "vertical",
+    showAxis: true,
+    showGridlines: true,
+    gridlineColor: "#e0e0e0",
+    axisColor: "#333333",
+    axisFontSize: 12,
+    yAxisTitle: "",
+    showYAxisTitle: false,
+    yAxisMode: "auto",
+    yAxisMin: 0,
+    yAxisMax: 100,
+    yAxisPadding: 10,
+    showLabels: false,
+    labelColor: "#333333",
+    labelFontSize: 10,
+    showStatistics: false,
+    showConfidenceInterval: false,
+    confidenceLevel: 95,
+    sortBy: "category",
+    sortOrder: "ascending",
+    showReferenceLine: false,
+    referenceLineValue: 0,
+    referenceLineColor: "#ff0000",
+    referenceLineStyle: "dashed",
+    referenceLineLabel: ""
+};
+
+export class VisualSettings {
+    public boxplot: BoxplotSettings = defaultSettings;
+
+    public static getDefault(): VisualSettings {
+        return new VisualSettings();
+    }
+}

@@ -1,0 +1,17 @@
+{
+		"version": "1.0.0.0",
+		"author": {"name":"Alex Luo","email":"aluo@wlgore.com"},
+		"resources": [
+			{
+				"resourceId": "rId0",
+				"sourceType": 5,
+				"file": "resources/boxplotVisual8A2B3C4D5E6F.pbiviz.json"
+			}
+		],
+		"visual": {"name":"boxplotVisual","displayName":"Boxplot","guid":"boxplotVisual8A2B3C4D5E6F","visualClassName":"Visual","version":"1.0.0.0","description":"A customizable boxplot visual for Power BI","supportUrl":"https://example.com/support","gitHubUrl":""},
+		"metadata": {
+			"pbivizjson": {
+				"resourceId": "rId0"
+			}
+		}
+	}
