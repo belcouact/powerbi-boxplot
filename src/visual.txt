@@ -176,8 +176,6 @@ export class Visual implements IVisual {
         let valuesIdx = -1;
         let hasExplicitCategory = false;
 
-        let detailIdx = -1;
-
         if (table.columns) {
             for (let i = 0; i < table.columns.length; i++) {
                 const col = table.columns[i];
@@ -187,7 +185,6 @@ export class Visual implements IVisual {
                         hasExplicitCategory = true;
                     }
                     if (col.roles["subCategory"]) subCategoryIdx = i;
-                    if (col.roles["detail"]) detailIdx = i;
                     if (col.roles["values"]) valuesIdx = i;
                 }
             }
@@ -195,7 +192,6 @@ export class Visual implements IVisual {
 
         if (valuesIdx === -1) {
             for (let i = 0; i < table.columns.length; i++) {
-                if (i === detailIdx) continue;
                 const col = table.columns[i];
                 if (col.type && (col.type.numeric || col.type.integer)) {
                     valuesIdx = i;
@@ -244,19 +240,6 @@ export class Visual implements IVisual {
                 if (sampleValues.length < 3) {
                     sampleValues.push(`${category}: idx=${valuesIdx} val=${JSON.stringify(value)} [INVALID]`);
                 }
-            }
-        }
-
-        if (validCount > 0 && groupedData.size > 0) {
-            // Check if data might be deduplicated (no detail field, few unique values)
-            const totalGroupValues = Array.from(groupedData.values()).reduce((sum, g) => sum + g.values.length, 0);
-            if (detailIdx === -1 && totalGroupValues < table.rows.length * 0.5) {
-                this.showDebugMessage(width, height,
-                    `Warning: Only ${totalGroupValues} of ${table.rows.length} rows produced numeric values.\n` +
-                    `If your Values field contains few unique numbers, Power BI may be deduplicating rows.\n\n` +
-                    `Fix: Drag a unique identifier (e.g. Sample Number) into the "Detail" field\n` +
-                    `to preserve all individual data points.`);
-                return [];
             }
         }
 

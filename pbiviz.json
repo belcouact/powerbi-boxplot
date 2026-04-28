@@ -2,7 +2,7 @@
   "visual": {
     "name": "boxplotVisual",
     "displayName": "Boxplot",
-    "guid": "boxplotVisual8A2B3C4D5E6F",
+    "guid": "boxplotVisual",
     "visualClassName": "Visual",
     "version": "1.0.0.0",
     "description": "A customizable boxplot visual for Power BI",
