@@ -14,6 +14,7 @@ import { VisualSettings, BoxplotSettings, defaultSettings } from "./settings";
 interface BoxplotData {
     category: string;
     subCategory: string;
+    smallMultiple: string;
     min: number;
     q1: number;
     median: number;
@@ -27,6 +28,7 @@ interface BoxplotData {
     values: number[];
     confidenceInterval: [number, number];
     colorIndex: number;
+    tooltipValues: { [key: string]: string };
 }
 
 export class Visual implements IVisual {
@@ -44,7 +46,8 @@ export class Visual implements IVisual {
 
         this.svg = d3.select(this.target)
             .append("svg")
-            .classed("boxplot-svg", true);
+            .classed("boxplot-svg", true)
+            .style("overflow", "visible");
 
         this.mainGroup = this.svg
             .append("g")
@@ -68,7 +71,7 @@ export class Visual implements IVisual {
         }
 
         const dataViewType = dataView.categorical ? "categorical" : dataView.table ? "table" : "unknown";
-        
+
         if (!dataView.table) {
             this.showDebugMessage(width, height, `Expected table data but got: ${dataViewType}\n\nPlease ensure you have added:\n- Category field\n- Values field`);
             return;
@@ -80,17 +83,22 @@ export class Visual implements IVisual {
         }
 
         let boxplotData = this.processData(dataView, width, height);
-        
+
         if (boxplotData.length === 0) {
             return;
         }
 
-        boxplotData = this.sortData(boxplotData);
+        const hasSmallMultiples = boxplotData.some(d => d.smallMultiple && d.smallMultiple !== "");
 
-        if (this.settings.boxplot.orientation === "horizontal") {
-            this.renderHorizontalBoxplot(boxplotData, width, height);
+        if (hasSmallMultiples) {
+            this.renderSmallMultiples(boxplotData, width, height);
         } else {
-            this.renderVerticalBoxplot(boxplotData, width, height);
+            boxplotData = this.sortData(boxplotData);
+            if (this.settings.boxplot.orientation === "horizontal") {
+                this.renderHorizontalBoxplot(boxplotData, width, height);
+            } else {
+                this.renderVerticalBoxplot(boxplotData, width, height);
+            }
         }
     }
 
@@ -158,6 +166,9 @@ export class Visual implements IVisual {
             if (objects["referenceLines"]) {
                 Object.assign(merged, objects["referenceLines"]);
             }
+            if (objects["smallMultiples"]) {
+                Object.assign(merged, objects["smallMultiples"]);
+            }
 
             settings.boxplot = merged as BoxplotSettings;
         }
@@ -174,6 +185,7 @@ export class Visual implements IVisual {
         let categoryIdx = -1;
         let subCategoryIdx = -1;
         let valuesIdx = -1;
+        let smallMultiplesIdx = -1;
         let hasExplicitCategory = false;
 
         let detailIdx = -1;
@@ -187,15 +199,26 @@ export class Visual implements IVisual {
                         hasExplicitCategory = true;
                     }
                     if (col.roles["subCategory"]) subCategoryIdx = i;
+                    if (col.roles["smallMultiples"]) smallMultiplesIdx = i;
                     if (col.roles["detail"]) detailIdx = i;
                     if (col.roles["values"]) valuesIdx = i;
                 }
             }
         }
 
+        let tooltipIdxs: number[] = [];
+        if (table.columns) {
+            for (let i = 0; i < table.columns.length; i++) {
+                const col = table.columns[i];
+                if (col.roles && col.roles["tooltip"]) {
+                    tooltipIdxs.push(i);
+                }
+            }
+        }
+
         if (valuesIdx === -1) {
             for (let i = 0; i < table.columns.length; i++) {
-                if (i === detailIdx) continue;
+                if (i === detailIdx || i === smallMultiplesIdx || tooltipIdxs.includes(i)) continue;
                 const col = table.columns[i];
                 if (col.type && (col.type.numeric || col.type.integer)) {
                     valuesIdx = i;
@@ -210,7 +233,9 @@ export class Visual implements IVisual {
         }
         if (valuesIdx === -1) valuesIdx = Math.min(table.columns.length - 1, 2);
 
-        const groupedData: Map<string, { values: number[]; subCategory: string }> = new Map();
+        const tooltipColNames: string[] = tooltipIdxs.map(idx => table.columns[idx].displayName || `Tooltip ${idx}`);
+
+        const groupedData: Map<string, { values: number[]; subCategory: string; smallMultiple: string; tooltipValues: { [key: string]: string } }> = new Map();
         let validCount = 0;
         let invalidCount = 0;
         let sampleValues: string[] = [];
@@ -219,9 +244,10 @@ export class Visual implements IVisual {
             const row = table.rows[i];
             const category = useSingleGroup ? "Data" : (row[categoryIdx] !== null && row[categoryIdx] !== undefined ? String(row[categoryIdx]) : "Unknown");
             const subCategory = subCategoryIdx !== -1 && row[subCategoryIdx] !== null && row[subCategoryIdx] !== undefined ? String(row[subCategoryIdx]) : "";
+            const smallMultiple = smallMultiplesIdx !== -1 && row[smallMultiplesIdx] !== null && row[smallMultiplesIdx] !== undefined ? String(row[smallMultiplesIdx]) : "";
             const value = row[valuesIdx];
 
-            const key = subCategory ? `${category}|||${subCategory}` : category;
+            const key = `${category}|||${subCategory}|||${smallMultiple}`;
 
             let numValue: number;
             if (typeof value === 'object' && value !== null && !(value instanceof Date)) {
@@ -232,7 +258,13 @@ export class Visual implements IVisual {
 
             if (value !== null && value !== undefined && !isNaN(numValue)) {
                 if (!groupedData.has(key)) {
-                    groupedData.set(key, { values: [], subCategory });
+                    const tooltipValues: { [key: string]: string } = {};
+                    tooltipIdxs.forEach((tIdx, tIndex) => {
+                        const tColName = tooltipColNames[tIndex];
+                        const tVal = row[tIdx];
+                        tooltipValues[tColName] = tVal !== null && tVal !== undefined ? String(tVal) : "";
+                    });
+                    groupedData.set(key, { values: [], subCategory, smallMultiple, tooltipValues });
                 }
                 groupedData.get(key)!.values.push(numValue);
                 validCount++;
@@ -248,7 +280,6 @@ export class Visual implements IVisual {
         }
 
         if (validCount > 0 && groupedData.size > 0) {
-            // Check if data might be deduplicated (no detail field, few unique values)
             const totalGroupValues = Array.from(groupedData.values()).reduce((sum, g) => sum + g.values.length, 0);
             if (detailIdx === -1 && totalGroupValues < table.rows.length * 0.5) {
                 this.showDebugMessage(width, height,
@@ -273,6 +304,7 @@ export class Visual implements IVisual {
             const parts = key.split("|||");
             const category = parts[0];
             const subCategory = parts[1] || "";
+            const smallMultiple = parts[2] || "";
             const values = data.values.sort(d3.ascending);
 
             if (values.length === 0) continue;
@@ -282,15 +314,17 @@ export class Visual implements IVisual {
             result.push({
                 category,
                 subCategory,
+                smallMultiple,
                 ...stats,
-                colorIndex: colorIndex++
+                colorIndex: colorIndex++,
+                tooltipValues: data.tooltipValues
             });
         }
 
         return result;
     }
 
-    private calculateStatistics(data: number[]): Omit<BoxplotData, "category" | "subCategory" | "colorIndex"> {
+    private calculateStatistics(data: number[]): Omit<BoxplotData, "category" | "subCategory" | "smallMultiple" | "colorIndex" | "tooltipValues"> {
         const n = data.length;
         const mean = d3.mean(data) as number;
         const stdDev = d3.deviation(data) || 0;
@@ -465,10 +499,126 @@ export class Visual implements IVisual {
         return result;
     }
 
+    private getWrappedLineCount(text: string, maxCharsPerLine: number): number {
+        if (!text) return 1;
+        const words = text.split(/\s+/);
+        const lines: string[] = [];
+        let currentLine = "";
+
+        for (const word of words) {
+            if (word.length > maxCharsPerLine) {
+                if (currentLine) {
+                    lines.push(currentLine.trim());
+                    currentLine = "";
+                }
+                for (let i = 0; i < word.length; i += maxCharsPerLine) {
+                    const chunk = word.substring(i, i + maxCharsPerLine);
+                    if (i + maxCharsPerLine < word.length) {
+                        lines.push(chunk);
+                    } else {
+                        currentLine = chunk;
+                    }
+                }
+            } else if ((currentLine + " " + word).trim().length > maxCharsPerLine) {
+                if (currentLine) {
+                    lines.push(currentLine.trim());
+                }
+                currentLine = word;
+            } else {
+                currentLine = currentLine ? currentLine + " " + word : word;
+            }
+        }
+        if (currentLine) {
+            lines.push(currentLine.trim());
+        }
+        return Math.max(lines.length, 1);
+    }
+
+    private wrapAxisText(textSelection: d3.Selection<SVGTextElement, any, any, any>, maxCharsPerLine: number, lineHeight: number): void {
+        textSelection.each(function (this: SVGTextElement) {
+            const textEl = d3.select(this);
+            const fullText = textEl.text();
+            if (!fullText) return;
+
+            const words = fullText.split(/\s+/);
+            const lines: string[] = [];
+            let currentLine = "";
+
+            for (const word of words) {
+                if (word.length > maxCharsPerLine) {
+                    if (currentLine) {
+                        lines.push(currentLine.trim());
+                        currentLine = "";
+                    }
+                    for (let i = 0; i < word.length; i += maxCharsPerLine) {
+                        const chunk = word.substring(i, i + maxCharsPerLine);
+                        if (i + maxCharsPerLine < word.length) {
+                            lines.push(chunk);
+                        } else {
+                            currentLine = chunk;
+                        }
+                    }
+                } else if ((currentLine + " " + word).trim().length > maxCharsPerLine) {
+                    if (currentLine) {
+                        lines.push(currentLine.trim());
+                    }
+                    currentLine = word;
+                } else {
+                    currentLine = currentLine ? currentLine + " " + word : word;
+                }
+            }
+            if (currentLine) {
+                lines.push(currentLine.trim());
+            }
+
+            if (lines.length === 0) {
+                lines.push(fullText);
+            }
+
+            textEl.text(null);
+            lines.forEach((line, i) => {
+                textEl.append("tspan")
+                    .attr("x", 0)
+                    .attr("dy", i === 0 ? "0.71em" : `${lineHeight}em`)
+                    .text(line);
+            });
+        });
+    }
+
     private renderVerticalBoxplot(data: BoxplotData[], width: number, height: number): void {
         const settings = this.settings.boxplot;
         const margin = { top: 30, right: 30, bottom: 80, left: 70 };
         const innerWidth = width - margin.left - margin.right;
+
+        const categories = [...new Set(data.map(d => d.category))];
+        const labelOrientation = settings.xAxisLabelOrientation || "vertical";
+
+        let maxLabelLines = 1;
+        for (const cat of categories) {
+            maxLabelLines = Math.max(maxLabelLines, this.getWrappedLineCount(cat, 30));
+        }
+        const lineHeightEm = 1.1;
+
+        if (labelOrientation === "horizontal") {
+            if (maxLabelLines > 1) {
+                const extraBottom = (maxLabelLines - 1) * settings.axisFontSize * lineHeightEm;
+                margin.bottom = Math.max(margin.bottom, 50 + extraBottom);
+            }
+        } else if (labelOrientation === "vertical") {
+            let maxLabelWidth = 0;
+            for (const cat of categories) {
+                maxLabelWidth = Math.max(maxLabelWidth, cat.length * settings.axisFontSize * 0.6);
+            }
+            margin.bottom = Math.max(margin.bottom, 50 + maxLabelWidth);
+        } else if (labelOrientation === "angled") {
+            let maxLabelDiagonal = 0;
+            for (const cat of categories) {
+                const labelWidth = cat.length * settings.axisFontSize * 0.6;
+                maxLabelDiagonal = Math.max(maxLabelDiagonal, labelWidth * 0.75);
+            }
+            margin.bottom = Math.max(margin.bottom, 50 + maxLabelDiagonal);
+        }
+
         const innerHeight = height - margin.top - margin.bottom;
 
         const g = this.mainGroup
@@ -499,7 +649,6 @@ export class Visual implements IVisual {
             .range([innerHeight, 0]);
 
         const hasSubCategory = data.some(d => d.subCategory);
-        const categories = [...new Set(data.map(d => d.category))];
 
         const xCategory = d3.scaleBand()
             .domain(categories)
@@ -532,17 +681,30 @@ export class Visual implements IVisual {
                 .attr("fill", settings.axisColor)
                 .style("font-size", `${settings.axisFontSize}px`);
 
-            g.append("g")
+            const xAxisGroup = g.append("g")
                 .attr("class", "x-axis")
                 .attr("transform", `translate(0, ${innerHeight})`)
-                .call(d3.axisBottom(xCategory))
-                .selectAll("text")
+                .call(d3.axisBottom(xCategory));
+
+            const xAxisTexts = xAxisGroup.selectAll("text")
                 .attr("fill", settings.axisColor)
-                .style("font-size", `${settings.axisFontSize}px`)
-                .attr("transform", "rotate(-45)")
-                .attr("text-anchor", "end")
-                .attr("dx", "-0.5em")
-                .attr("dy", "0.5em");
+                .style("font-size", `${settings.axisFontSize}px`);
+
+            if (labelOrientation === "horizontal") {
+                this.wrapAxisText(xAxisTexts as any, 30, lineHeightEm);
+            } else if (labelOrientation === "angled") {
+                xAxisTexts
+                    .attr("transform", "rotate(-45)")
+                    .attr("text-anchor", "end")
+                    .attr("dx", "-0.5em")
+                    .attr("dy", "0.5em");
+            } else {
+                xAxisTexts
+                    .attr("transform", "rotate(-90)")
+                    .attr("text-anchor", "end")
+                    .attr("dx", "-0.5em")
+                    .attr("dy", "-0.3em");
+            }
         }
 
         if (settings.showYAxisTitle && settings.yAxisTitle) {
@@ -796,6 +958,258 @@ export class Visual implements IVisual {
 
         if (settings.showReferenceLine) {
             this.drawReferenceLineHorizontal(g, x, innerWidth, innerHeight, settings);
+        }
+    }
+
+    private renderSmallMultiples(data: BoxplotData[], width: number, height: number): void {
+        const settings = this.settings.boxplot;
+
+        const smallMultipleValues = [...new Set(data.map(d => d.smallMultiple).filter(s => s))];
+        const numPanels = smallMultipleValues.length || 1;
+
+        const numCols = Math.min(settings.smallMultiplesColumns || 3, numPanels);
+        const numRows = Math.ceil(numPanels / numCols);
+
+        const isMobile = width < 768;
+        const isTablet = width >= 768 && width < 1024;
+
+        const adjustedCols = isMobile ? 1 : (isTablet ? Math.min(2, numCols) : numCols);
+        const adjustedRows = Math.ceil(numPanels / adjustedCols);
+
+        const outerPad = isMobile ? 4 : 6;
+        const panelGap = isMobile ? 6 : 10;
+        const titleHeight = (settings.smallMultiplesPanelTitle && settings.smallMultiplesPanelTitle !== "hidden") ? (isMobile ? 18 : 22) : 0;
+
+        const totalHorizontalGap = (adjustedCols - 1) * panelGap;
+        const totalVerticalGap = (adjustedRows - 1) * panelGap;
+
+        const availableWidth = width - outerPad * 2 - totalHorizontalGap;
+        const availableHeight = height - outerPad * 2 - totalVerticalGap;
+
+        const panelWidth = availableWidth / adjustedCols;
+        const panelHeight = availableHeight / adjustedRows;
+
+        smallMultipleValues.forEach((smValue, index) => {
+            const col = index % adjustedCols;
+            const row = Math.floor(index / adjustedCols);
+
+            const panelX = outerPad + col * (panelWidth + panelGap);
+            const panelY = outerPad + row * (panelHeight + panelGap);
+
+            const panelGroup = this.mainGroup
+                .append("g")
+                .attr("class", "small-multiple-panel")
+                .attr("transform", `translate(${panelX}, ${panelY})`);
+
+            if (settings.smallMultiplesPanelTitle && settings.smallMultiplesPanelTitle !== "hidden") {
+                const titleSize = settings.smallMultiplesPanelTitleSize || 14;
+                const titleColor = settings.smallMultiplesPanelTitleColor || "#333333";
+
+                panelGroup.append("text")
+                    .attr("class", "panel-title")
+                    .attr("x", panelWidth / 2)
+                    .attr("y", titleHeight - 4)
+                    .attr("text-anchor", "middle")
+                    .attr("fill", titleColor)
+                    .style("font-size", `${titleSize}px`)
+                    .style("font-weight", "bold")
+                    .text(smValue);
+            }
+
+            const panelData = data.filter(d => d.smallMultiple === smValue);
+            const sortedPanelData = this.sortData(panelData);
+
+            this.renderPanelChart(panelGroup, sortedPanelData, panelWidth, panelHeight, titleHeight, settings);
+        });
+    }
+
+    private renderPanelChart(
+        g: Selection<SVGGElement>,
+        data: BoxplotData[],
+        width: number,
+        height: number,
+        titleHeight: number,
+        settings: BoxplotSettings
+    ): void {
+        const isMobile = width < 300;
+
+        const labelOrientation = settings.xAxisLabelOrientation || "vertical";
+        const margin = {
+            top: titleHeight,
+            right: isMobile ? 4 : 6,
+            bottom: isMobile ? 30 : 42,
+            left: isMobile ? 28 : 42
+        };
+
+        const innerWidth = width - margin.left - margin.right;
+        let innerHeight = height - margin.top - margin.bottom;
+
+        if (innerWidth <= 0 || innerHeight <= 0) return;
+
+        const panelGroup = g
+            .append("g")
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        const isVertical = settings.orientation !== "horizontal";
+
+        let valueExtent: [number, number];
+        if (settings.yAxisMode === "manual") {
+            valueExtent = [settings.yAxisMin, settings.yAxisMax];
+        } else {
+            const allValues = data.flatMap(d => d.values);
+            const allOutliers = settings.showOutliers && settings.outlierStyle !== "hidden"
+                ? data.flatMap(d => d.outliers)
+                : [];
+            const valuesForExtent = settings.showOutliers && settings.outlierStyle !== "hidden"
+                ? [...allValues, ...allOutliers]
+                : data.flatMap(d => [d.min, d.max]);
+            const extent = d3.extent(valuesForExtent) as [number, number];
+            const padding = (extent[1] - extent[0]) * (settings.yAxisPadding / 100) || 1;
+            valueExtent = [extent[0] - padding, extent[1] + padding];
+        }
+
+        if (isVertical) {
+            const y = d3.scaleLinear().domain(valueExtent).range([innerHeight, 0]);
+            const categories = [...new Set(data.map(d => d.category))];
+            const xBandwidth = innerWidth / Math.max(categories.length, 1);
+            const x = d3.scaleBand().domain(categories).range([0, innerWidth]).padding(0.3);
+
+            if (settings.showGridlines) {
+                panelGroup.append("g")
+                    .attr("class", "gridlines")
+                    .call(d3.axisLeft(y).ticks(5).tickSize(-innerWidth).tickFormat(() => ""))
+                    .selectAll("line")
+                    .attr("stroke", settings.gridlineColor)
+                    .attr("stroke-dasharray", "2,2");
+                panelGroup.select(".gridlines .domain").remove();
+            }
+
+            if (settings.showAxis) {
+                const yAxisGroup = panelGroup.append("g")
+                    .attr("class", "y-axis")
+                    .call(d3.axisLeft(y).ticks(5));
+                yAxisGroup.selectAll("text")
+                    .attr("fill", settings.axisColor)
+                    .style("font-size", `${Math.max(settings.axisFontSize - 2, 8)}px`);
+
+                if (settings.showYAxisTitle && settings.yAxisTitle) {
+                    yAxisGroup.append("text")
+                        .attr("class", "y-axis-title")
+                        .attr("transform", "rotate(-90)")
+                        .attr("x", -innerHeight / 2)
+                        .attr("y", -margin.left + 10)
+                        .attr("text-anchor", "middle")
+                        .attr("fill", settings.axisColor)
+                        .style("font-size", `${Math.max(settings.axisFontSize, 9)}px`)
+                        .text(settings.yAxisTitle);
+                }
+
+                const xAxisGroup = panelGroup.append("g")
+                    .attr("class", "x-axis")
+                    .attr("transform", `translate(0, ${innerHeight})`)
+                    .call(d3.axisBottom(x));
+
+                const xAxisTexts = xAxisGroup.selectAll("text")
+                    .attr("fill", settings.axisColor)
+                    .style("font-size", `${Math.max(settings.axisFontSize - 2, 8)}px`);
+
+                if (labelOrientation === "horizontal") {
+                    this.wrapAxisText(xAxisTexts as any, 20, 1.0);
+                } else if (labelOrientation === "angled") {
+                    xAxisTexts
+                        .attr("transform", "rotate(-45)")
+                        .attr("text-anchor", "end")
+                        .attr("dx", "-0.3em")
+                        .attr("dy", "0.3em");
+                } else {
+                    xAxisTexts
+                        .attr("transform", "rotate(-90)")
+                        .attr("text-anchor", "end")
+                        .attr("dx", "-0.3em")
+                        .attr("dy", "-0.2em");
+                }
+            }
+
+            if (settings.showDistribution) {
+                this.renderDistributionOverlay(panelGroup, data, x, null, y, innerHeight, false);
+            }
+
+            const boxWidth = x.bandwidth() * settings.boxWidth;
+
+            data.forEach(d => {
+                const group = panelGroup.append("g")
+                    .attr("class", "box-group")
+                    .attr("transform", `translate(${x(d.category)! + x.bandwidth() / 2}, 0)`);
+
+                const boxColor = settings.useCategoryColors ? this.colorPalette(d.category) : settings.boxColor;
+
+                this.drawWhiskers(group, d, y, boxWidth, settings);
+                this.drawBox(group, d, y, boxWidth, boxColor, settings);
+
+                if (settings.showMedian) this.drawMedian(group, d, y, boxWidth, settings);
+                if (settings.showMean) this.drawMean(group, d, y, settings);
+                if (settings.showOutliers && settings.outlierStyle !== "hidden") {
+                    this.drawOutliers(group, d, y, boxWidth, settings);
+                }
+
+                this.drawTooltip(group, d, y, boxWidth, settings);
+            });
+        } else {
+            const x = d3.scaleLinear().domain(valueExtent).range([0, innerWidth]);
+            const categories = [...new Set(data.map(d => d.category))];
+            const y = d3.scaleBand().domain(categories).range([0, innerHeight]).padding(0.3);
+
+            if (settings.showGridlines) {
+                panelGroup.append("g")
+                    .attr("class", "gridlines")
+                    .call(d3.axisBottom(x).ticks(5).tickSize(-innerHeight).tickFormat(() => ""))
+                    .selectAll("line")
+                    .attr("stroke", settings.gridlineColor)
+                    .attr("stroke-dasharray", "2,2");
+                panelGroup.select(".gridlines .domain").remove();
+            }
+
+            if (settings.showAxis) {
+                panelGroup.append("g")
+                    .attr("class", "x-axis")
+                    .attr("transform", `translate(0, ${innerHeight})`)
+                    .call(d3.axisBottom(x).ticks(5))
+                    .selectAll("text")
+                    .attr("fill", settings.axisColor)
+                    .style("font-size", `${Math.max(settings.axisFontSize - 2, 8)}px`);
+
+                panelGroup.append("g")
+                    .attr("class", "y-axis")
+                    .call(d3.axisLeft(y))
+                    .selectAll("text")
+                    .attr("fill", settings.axisColor)
+                    .style("font-size", `${Math.max(settings.axisFontSize - 2, 8)}px`);
+            }
+
+            if (settings.showDistribution) {
+                this.renderDistributionOverlayHorizontal(panelGroup, data, y, null, x, innerWidth, false);
+            }
+
+            const boxHeight = y.bandwidth() * settings.boxWidth;
+
+            data.forEach(d => {
+                const group = panelGroup.append("g")
+                    .attr("class", "box-group")
+                    .attr("transform", `translate(0, ${y(d.category)! + y.bandwidth() / 2})`);
+
+                const boxColor = settings.useCategoryColors ? this.colorPalette(d.category) : settings.boxColor;
+
+                this.drawWhiskersHorizontal(group, d, x, boxHeight, settings);
+                this.drawBoxHorizontal(group, d, x, boxHeight, boxColor, settings);
+
+                if (settings.showMedian) this.drawMedianHorizontal(group, d, x, boxHeight, settings);
+                if (settings.showMean) this.drawMeanHorizontal(group, d, x, settings);
+                if (settings.showOutliers && settings.outlierStyle !== "hidden") {
+                    this.drawOutliersHorizontal(group, d, x, boxHeight, settings);
+                }
+
+                this.drawTooltipHorizontal(group, d, x, boxHeight, settings);
+            });
         }
     }
 
@@ -1400,6 +1814,110 @@ export class Visual implements IVisual {
         }
     }
 
+    private drawTooltip(
+        group: Selection<SVGGElement>,
+        d: BoxplotData,
+        y: d3.ScaleLinear<number, number>,
+        boxWidth: number,
+        _settings: BoxplotSettings
+    ): void {
+        const tooltipKeys = Object.keys(d.tooltipValues);
+        if (tooltipKeys.length === 0) return;
+
+        const tooltipGroup = group.append("g")
+            .attr("class", "tooltip-group")
+            .style("opacity", 0)
+            .style("pointer-events", "none");
+
+        const tooltipText = tooltipKeys.map(k => `${k}: ${d.tooltipValues[k]}`).join("\n");
+        const lines = tooltipText.split("\n");
+        const lineHeight = 12;
+        const padding = 6;
+        const boxHeight = lines.length * lineHeight + padding * 2;
+        const maxLineWidth = Math.max(...lines.map(l => l.length * 6));
+        const boxW = Math.max(maxLineWidth + padding * 2, 80);
+
+        tooltipGroup.append("rect")
+            .attr("class", "tooltip-bg")
+            .attr("x", boxWidth / 2 + 5)
+            .attr("y", y(d.median) - boxHeight / 2)
+            .attr("width", boxW)
+            .attr("height", boxHeight)
+            .attr("rx", 4)
+            .attr("fill", "rgba(255, 255, 255, 0.95)")
+            .attr("stroke", "#cccccc")
+            .attr("stroke-width", 1);
+
+        lines.forEach((line, i) => {
+            tooltipGroup.append("text")
+                .attr("class", "tooltip-text")
+                .attr("x", boxWidth / 2 + 5 + padding)
+                .attr("y", y(d.median) - boxHeight / 2 + padding + (i + 0.8) * lineHeight)
+                .attr("fill", "#333333")
+                .style("font-size", "10px")
+                .style("font-family", "sans-serif")
+                .text(line);
+        });
+
+        group.on("mouseenter", function () {
+            tooltipGroup.style("opacity", 1);
+        }).on("mouseleave", function () {
+            tooltipGroup.style("opacity", 0);
+        });
+    }
+
+    private drawTooltipHorizontal(
+        group: Selection<SVGGElement>,
+        d: BoxplotData,
+        x: d3.ScaleLinear<number, number>,
+        boxHeight: number,
+        _settings: BoxplotSettings
+    ): void {
+        const tooltipKeys = Object.keys(d.tooltipValues);
+        if (tooltipKeys.length === 0) return;
+
+        const tooltipGroup = group.append("g")
+            .attr("class", "tooltip-group")
+            .style("opacity", 0)
+            .style("pointer-events", "none");
+
+        const tooltipText = tooltipKeys.map(k => `${k}: ${d.tooltipValues[k]}`).join("\n");
+        const lines = tooltipText.split("\n");
+        const lineHeight = 12;
+        const padding = 6;
+        const boxH = lines.length * lineHeight + padding * 2;
+        const maxLineWidth = Math.max(...lines.map(l => l.length * 6));
+        const boxW = Math.max(maxLineWidth + padding * 2, 80);
+
+        tooltipGroup.append("rect")
+            .attr("class", "tooltip-bg")
+            .attr("x", x(d.median) + 5)
+            .attr("y", -boxH / 2)
+            .attr("width", boxW)
+            .attr("height", boxH)
+            .attr("rx", 4)
+            .attr("fill", "rgba(255, 255, 255, 0.95)")
+            .attr("stroke", "#cccccc")
+            .attr("stroke-width", 1);
+
+        lines.forEach((line, i) => {
+            tooltipGroup.append("text")
+                .attr("class", "tooltip-text")
+                .attr("x", x(d.median) + 5 + padding)
+                .attr("y", -boxH / 2 + padding + (i + 0.8) * lineHeight)
+                .attr("fill", "#333333")
+                .style("font-size", "10px")
+                .style("font-family", "sans-serif")
+                .text(line);
+        });
+
+        group.on("mouseenter", function () {
+            tooltipGroup.style("opacity", 1);
+        }).on("mouseleave", function () {
+            tooltipGroup.style("opacity", 0);
+        });
+    }
+
     private drawReferenceLine(
         g: Selection<SVGGElement>,
         y: d3.ScaleLinear<number, number>,
@@ -1544,7 +2062,8 @@ export class Visual implements IVisual {
                     yAxisMode: s.yAxisMode,
                     yAxisMin: s.yAxisMin,
                     yAxisMax: s.yAxisMax,
-                    yAxisPadding: s.yAxisPadding
+                    yAxisPadding: s.yAxisPadding,
+                    xAxisLabelOrientation: s.xAxisLabelOrientation
                 };
                 break;
             case "labels":
@@ -1570,6 +2089,14 @@ export class Visual implements IVisual {
                     referenceLineColor: s.referenceLineColor,
                     referenceLineStyle: s.referenceLineStyle,
                     referenceLineLabel: s.referenceLineLabel
+                };
+                break;
+            case "smallMultiples":
+                instance.properties = {
+                    smallMultiplesColumns: s.smallMultiplesColumns,
+                    smallMultiplesPanelTitle: s.smallMultiplesPanelTitle,
+                    smallMultiplesPanelTitleSize: s.smallMultiplesPanelTitleSize,
+                    smallMultiplesPanelTitleColor: s.smallMultiplesPanelTitleColor
                 };
                 break;
         }

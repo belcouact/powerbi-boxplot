@@ -53,6 +53,7 @@ export interface BoxplotSettings {
     yAxisMin: number;
     yAxisMax: number;
     yAxisPadding: number;
+    xAxisLabelOrientation: string;
     showLabels: boolean;
     labelColor: string;
     labelFontSize: number;
@@ -66,6 +67,10 @@ export interface BoxplotSettings {
     referenceLineColor: string;
     referenceLineStyle: string;
     referenceLineLabel: string;
+    smallMultiplesColumns: number;
+    smallMultiplesPanelTitle: string;
+    smallMultiplesPanelTitleSize: number;
+    smallMultiplesPanelTitleColor: string;
 }
 
 export const defaultSettings: BoxplotSettings = {
@@ -123,6 +128,7 @@ export const defaultSettings: BoxplotSettings = {
     yAxisMin: 0,
     yAxisMax: 100,
     yAxisPadding: 10,
+    xAxisLabelOrientation: "vertical",
     showLabels: false,
     labelColor: "#333333",
     labelFontSize: 10,
@@ -135,7 +141,11 @@ export const defaultSettings: BoxplotSettings = {
     referenceLineValue: 0,
     referenceLineColor: "#ff0000",
     referenceLineStyle: "dashed",
-    referenceLineLabel: ""
+    referenceLineLabel: "",
+    smallMultiplesColumns: 3,
+    smallMultiplesPanelTitle: "above",
+    smallMultiplesPanelTitleSize: 14,
+    smallMultiplesPanelTitleColor: "#333333"
 };
 
 export class VisualSettings {

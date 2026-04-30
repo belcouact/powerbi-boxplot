@@ -11,6 +11,12 @@
             "kind": "Grouping"
         },
         {
+            "displayName": "Small Multiples",
+            "name": "smallMultiples",
+            "kind": "Grouping",
+            "description": "Creates a grid of boxplots, one for each unique value"
+        },
+        {
             "displayName": "Detail",
             "name": "detail",
             "kind": "Grouping",
@@ -25,6 +31,12 @@
                     "numeric": true
                 }
             ]
+        },
+        {
+            "displayName": "Tooltip",
+            "name": "tooltip",
+            "kind": "Grouping",
+            "description": "Additional fields to display in tooltips"
         }
     ],
     "privileges": [],
@@ -45,12 +57,22 @@
                         },
                         {
                             "for": {
+                                "in": "smallMultiples"
+                            }
+                        },
+                        {
+                            "for": {
                                 "in": "detail"
                             }
                         },
                         {
                             "for": {
                                 "in": "values"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "tooltip"
                             }
                         }
                     ],
@@ -583,6 +605,25 @@
                     "type": {
                         "numeric": true
                     }
+                },
+                "xAxisLabelOrientation": {
+                    "displayName": "X-Axis Label Orientation",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "vertical",
+                                "displayName": "Vertical"
+                            },
+                            {
+                                "value": "angled",
+                                "displayName": "Angled (-45°)"
+                            },
+                            {
+                                "value": "horizontal",
+                                "displayName": "Horizontal"
+                            }
+                        ]
+                    }
                 }
             }
         },
@@ -722,6 +763,52 @@
                     "displayName": "Reference Line Label",
                     "type": {
                         "text": true
+                    }
+                }
+            }
+        },
+        "smallMultiples": {
+            "displayName": "Small Multiples",
+            "properties": {
+                "smallMultiplesColumns": {
+                    "displayName": "Columns",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "smallMultiplesPanelTitle": {
+                    "displayName": "Panel Title Position",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "above",
+                                "displayName": "Above Panel"
+                            },
+                            {
+                                "value": "below",
+                                "displayName": "Below Panel"
+                            },
+                            {
+                                "value": "hidden",
+                                "displayName": "Hidden"
+                            }
+                        ]
+                    }
+                },
+                "smallMultiplesPanelTitleSize": {
+                    "displayName": "Panel Title Size",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "smallMultiplesPanelTitleColor": {
+                    "displayName": "Panel Title Color",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
                     }
                 }
             }
